@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from ..utils.checkpointing import save_checkpoint, load_checkpoint
 from ..utils.logging import setup_logging, log_metrics
+from ..utils.device import get_device, check_gpu_available, print_gpu_info
 
 
 class GPTDataset(Dataset):
@@ -99,7 +100,16 @@ class Trainer:
     ):
         self.model = model
         self.optimizer = optimizer
-        self.device = torch.device(device)
+        
+        # Get device and check GPU availability
+        self.device = get_device(device)
+        if device == 'cuda' and not check_gpu_available():
+            print("Warning: CUDA requested but not available. Using CPU instead.")
+        
+        # Print GPU info if using CUDA
+        if self.device.type == 'cuda':
+            print_gpu_info()
+        
         self.seq_len = seq_len
         self.batch_size = batch_size
         self.gradient_accumulation_steps = gradient_accumulation_steps
@@ -111,8 +121,8 @@ class Trainer:
         # Move model to device
         self.model.to(self.device)
         
-        # Setup mixed precision training
-        self.use_amp = use_amp and device == 'cuda'
+        # Setup mixed precision training (only if CUDA is available)
+        self.use_amp = use_amp and self.device.type == 'cuda'
         if self.use_amp:
             if amp_dtype == 'bfloat16':
                 self.amp_dtype = torch.bfloat16
@@ -299,8 +309,11 @@ class Trainer:
             epochs: Number of epochs to train
             scheduler: Optional learning rate scheduler
         """
-        print(f"Starting training on {self.device}")
+        print(f"\nStarting training on {self.device}")
+        if self.device.type == 'cuda':
+            print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
+        print(f"Mixed precision: {self.use_amp}")
         
         for epoch in range(self.epoch, epochs):
             self.epoch = epoch
