@@ -11,20 +11,31 @@ from .embeddings import RotaryPositionEmbedding, ALiBiPositionalEncoding
 
 def apply_causal_mask(
     scores: torch.Tensor,
-    mask_value: float = -1e9
+    mask_value: Optional[float] = None
 ) -> torch.Tensor:
     """Apply causal mask to attention scores.
     
     Args:
-        scores: Attention scores of shape (..., seq_len, seq_len)
-        mask_value: Value to use for masked positions
+        scores: Attention scores of shape (..., seq_len_q, seq_len_k)
+        mask_value: Value to use for masked positions (auto-detected based on dtype)
         
     Returns:
         Masked attention scores
     """
-    seq_len = scores.shape[-1]
-    # Create lower triangular mask
-    mask = torch.triu(torch.ones(seq_len, seq_len, device=scores.device), diagonal=1)
+    seq_len_q, seq_len_k = scores.shape[-2], scores.shape[-1]
+    
+    # Auto-detect appropriate mask value based on dtype
+    if mask_value is None:
+        if scores.dtype == torch.float16:
+            mask_value = -1e4  # Smaller value for float16 to avoid overflow
+        elif scores.dtype == torch.bfloat16:
+            mask_value = -1e4
+        else:
+            mask_value = -1e9
+    
+    # Create causal mask (lower triangular for seq_len_q x seq_len_k)
+    # Only mask positions where k_idx > q_idx
+    mask = torch.triu(torch.ones(seq_len_q, seq_len_k, device=scores.device, dtype=scores.dtype), diagonal=1)
     mask = mask.bool()
     scores = scores.masked_fill(mask, mask_value)
     return scores
@@ -155,7 +166,9 @@ class MultiHeadAttention(nn.Module):
         
         # Apply causal mask
         if causal_mask:
-            scores = apply_causal_mask(scores)
+            # Use appropriate mask value for the dtype
+            mask_value = -1e4 if scores.dtype in (torch.float16, torch.bfloat16) else -1e9
+            scores = apply_causal_mask(scores, mask_value=mask_value)
         
         # Apply attention mask if provided
         if attention_mask is not None:
@@ -442,7 +455,8 @@ class GroupedQueryAttention(nn.Module):
         
         # Apply causal mask
         if is_causal:
-            scores = apply_causal_mask(scores)
+            mask_value = -1e4 if scores.dtype in (torch.float16, torch.bfloat16) else -1e9
+            scores = apply_causal_mask(scores, mask_value=mask_value)
         
         # Apply attention mask if provided
         if attention_mask is not None:

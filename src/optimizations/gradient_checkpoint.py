@@ -8,7 +8,8 @@ from torch.utils.checkpoint import checkpoint
 
 def apply_gradient_checkpointing(
     model: nn.Module,
-    checkpoint_fn: Optional[Callable] = None
+    checkpoint_fn: Optional[Callable] = None,
+    preserve_rng_state: bool = True
 ):
     """Apply gradient checkpointing to model.
     
@@ -18,25 +19,44 @@ def apply_gradient_checkpointing(
     Args:
         model: Model to apply checkpointing to
         checkpoint_fn: Custom checkpoint function (default: torch.utils.checkpoint.checkpoint)
+        preserve_rng_state: Whether to preserve RNG state during checkpointing
     """
     if checkpoint_fn is None:
-        checkpoint_fn = checkpoint
+        def default_checkpoint_fn(*args, **kwargs):
+            return checkpoint(*args, use_reentrant=False, preserve_rng_state=preserve_rng_state, **kwargs)
+        checkpoint_fn = default_checkpoint_fn
     
-    # Find transformer blocks and wrap their forward passes
-    for module in model.modules():
-        if isinstance(module, nn.ModuleList):
-            # Check if this is a list of transformer blocks
-            for i, block in enumerate(module):
-                if hasattr(block, 'forward'):
-                    # Wrap forward pass
-                    original_forward = block.forward
-                    
-                    def make_checkpointed_forward(block, orig_forward):
-                        def checkpointed_forward(*args, **kwargs):
-                            return checkpoint_fn(orig_forward, *args, **kwargs)
-                        return checkpointed_forward
-                    
-                    block.forward = make_checkpointed_forward(block, original_forward)
+    # Find transformer blocks (typically in model.blocks)
+    if hasattr(model, 'blocks') and isinstance(model.blocks, nn.ModuleList):
+        # Wrap each transformer block's forward pass
+        for block in model.blocks:
+            if hasattr(block, 'forward'):
+                original_forward = block.forward
+                
+                def make_checkpointed_forward(orig_forward):
+                    def checkpointed_forward(*args, **kwargs):
+                        return checkpoint_fn(orig_forward, *args, **kwargs)
+                    return checkpointed_forward
+                
+                block.forward = make_checkpointed_forward(original_forward)
+    else:
+        # Fallback: search for ModuleList containing transformer blocks
+        for module in model.modules():
+            if isinstance(module, nn.ModuleList):
+                # Check if this looks like transformer blocks
+                if len(module) > 0 and hasattr(module[0], 'forward'):
+                    for block in module:
+                        if hasattr(block, 'forward'):
+                            original_forward = block.forward
+                            
+                            def make_checkpointed_forward(orig_forward):
+                                def checkpointed_forward(*args, **kwargs):
+                                    return checkpoint_fn(orig_forward, *args, **kwargs)
+                                return checkpointed_forward
+                            
+                            block.forward = make_checkpointed_forward(original_forward)
+    
+    print(f"Gradient checkpointing applied to {len(model.blocks) if hasattr(model, 'blocks') else 'unknown'} transformer blocks")
 
 
 def checkpoint_sequential(

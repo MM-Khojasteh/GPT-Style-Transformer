@@ -12,6 +12,7 @@ from tqdm import tqdm
 from ..utils.checkpointing import save_checkpoint, load_checkpoint
 from ..utils.logging import setup_logging, log_metrics
 from ..utils.device import get_device, check_gpu_available, print_gpu_info
+from ..utils.memory_profiler import MemoryProfiler, estimate_batch_size, print_memory_info
 
 
 class GPTDataset(Dataset):
@@ -96,7 +97,10 @@ class Trainer:
         use_wandb: bool = False,
         use_tensorboard: bool = False,
         project_name: str = 'gpt-transformer',
-        resume_from: Optional[str] = None
+        resume_from: Optional[str] = None,
+        auto_batch_size: bool = False,
+        target_memory_utilization: float = 0.85,
+        enable_memory_profiling: bool = False
     ):
         self.model = model
         self.optimizer = optimizer
@@ -120,6 +124,29 @@ class Trainer:
         
         # Move model to device
         self.model.to(self.device)
+        
+        # Auto-adjust batch size if requested
+        if auto_batch_size and self.device.type == 'cuda':
+            available_memory_mb = torch.cuda.get_device_properties(self.device).total_memory / (1024**2)
+            estimated_batch = estimate_batch_size(
+                model=self.model,
+                seq_len=seq_len,
+                embed_dim=getattr(model, 'config', {}).get('embed_dim', 256),
+                available_memory_mb=available_memory_mb,
+                target_utilization=target_memory_utilization
+            )
+            if estimated_batch != batch_size:
+                print(f"Auto-adjusting batch size: {batch_size} -> {estimated_batch} (based on available memory)")
+                batch_size = estimated_batch
+            self.batch_size = batch_size
+        
+        # Setup memory profiler if enabled
+        self.enable_memory_profiling = enable_memory_profiling
+        if enable_memory_profiling and self.device.type == 'cuda':
+            self.memory_profiler = MemoryProfiler(device=self.device)
+            self.memory_profiler.start()
+        else:
+            self.memory_profiler = None
         
         # Setup mixed precision training (only if CUDA is available)
         self.use_amp = use_amp and self.device.type == 'cuda'
@@ -275,6 +302,13 @@ class Trainer:
             num_batches += 1
             self.global_step += 1
             
+            # Memory profiling
+            if self.memory_profiler and self.global_step % self.log_interval == 0:
+                self.memory_profiler.snapshot(
+                    label=f"Step {self.global_step}",
+                    additional_info={'step': self.global_step, 'loss': metrics['loss']}
+                )
+            
             # Log metrics
             if self.global_step % self.log_interval == 0:
                 log_metrics(
@@ -311,6 +345,9 @@ class Trainer:
         """
         print(f"\nStarting training on {self.device}")
         if self.device.type == 'cuda':
+            print_memory_info(self.device)
+            if self.memory_profiler:
+                self.memory_profiler.snapshot(label="Training start")
             print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
         print(f"Mixed precision: {self.use_amp}")
@@ -334,6 +371,18 @@ class Trainer:
             
             # Save epoch checkpoint
             self.save_checkpoint(f"checkpoint_epoch_{epoch}.pt")
+            
+            # Memory profiling snapshot at end of epoch
+            if self.memory_profiler:
+                self.memory_profiler.snapshot(
+                    label=f"End of Epoch {epoch}",
+                    additional_info={'epoch': epoch, 'loss': metrics['loss'], 'perplexity': metrics['perplexity']}
+                )
+        
+        # Print memory profiling summary
+        if self.memory_profiler:
+            print()
+            self.memory_profiler.print_summary()
     
     def save_checkpoint(self, filename: str):
         """Save training checkpoint.
