@@ -329,6 +329,467 @@ python examples/generate_text.py --checkpoint ./checkpoints/best_model.pt --prom
 tensorboard --logdir runs
 ```
 
+## Complete Training and Evaluation Guide
+
+This comprehensive guide covers everything you need to know about training and evaluating GPT models with this project.
+
+### Table of Contents
+1. [Data Preparation](#data-preparation)
+2. [Training Process](#training-process)
+3. [Model Evaluation](#model-evaluation)
+4. [Understanding Results](#understanding-results)
+5. [Best Practices](#best-practices)
+6. [Advanced Topics](#advanced-topics)
+
+### Data Preparation
+
+#### Data Format
+- **Format**: Plain text files (`.txt`)
+- **Encoding**: UTF-8
+- **Location**: Place data files in the `data/` directory
+
+#### Data Requirements
+- **Minimum Size**: For meaningful results, use at least 1,000-5,000 tokens
+- **Recommended Size**: 10,000+ tokens for better generalization
+- **Quality**: Clean, consistent text data works best
+
+#### Data Split Strategy
+
+**Why Split Data?**
+- **Training Set**: Used to train the model (typically 70-80%)
+- **Validation Set**: Used for hyperparameter tuning and early stopping (typically 10-15%)
+- **Test Set**: Used for final evaluation on unseen data (typically 10-15%)
+
+**Recommended Split:**
+```bash
+# 80% training, 10% validation, 10% test
+--val-split 0.1 --test-split 0.1
+```
+
+**Important Notes:**
+- Always use a separate test set that the model never sees during training
+- Shuffle data before splitting to ensure random distribution
+- Keep the same split for consistent comparisons across experiments
+
+### Training Process
+
+#### Basic Training
+
+**Quick Start:**
+```bash
+python examples/train_model.py \
+    --preset medium \
+    --epochs 10 \
+    --data data/sample_text.txt
+```
+
+#### Model Presets
+
+Choose a preset based on your resources and needs:
+
+| Preset | Parameters | Memory | Use Case |
+|--------|-----------|--------|----------|
+| `tiny` | ~100K | <1GB | Quick testing, learning |
+| `small` | ~500K | 1-2GB | Small datasets, prototyping |
+| `medium` | ~6M | 2-4GB | Medium datasets, balanced |
+| `large` | ~50M | 4-8GB | Large datasets, better quality |
+| `xl` | ~200M | 8-16GB | Very large datasets |
+| `xxl` | ~500M+ | 16GB+ | Production models |
+
+#### Training with Data Split (Recommended)
+
+**Complete Training Command:**
+```bash
+python examples/train_model.py \
+    --preset medium \
+    --epochs 10 \
+    --data data/sample_text.txt \
+    --val-split 0.1 \
+    --test-split 0.1 \
+    --save-splits \
+    --seed 42 \
+    --lr 3e-4
+```
+
+**What This Does:**
+1. Splits data into train/validation/test sets
+2. Saves splits to separate files for later use
+3. Trains model only on training set
+4. Uses consistent random seed for reproducibility
+
+**Output Files:**
+- `data/sample_text_train.txt` - Training data (80%)
+- `data/sample_text_val.txt` - Validation data (10%)
+- `data/sample_text_test.txt` - Test data (10%)
+- `checkpoints/best_model.pt` - Best model checkpoint
+- `checkpoints/checkpoint_epoch_N.pt` - Per-epoch checkpoints
+
+#### Training Hyperparameters
+
+**Learning Rate:**
+- **Default**: `3e-4` (0.0003)
+- **Small models**: Can use higher rates (5e-4 to 1e-3)
+- **Large models**: Use lower rates (1e-4 to 3e-4)
+- **Too high**: Training becomes unstable, loss spikes
+- **Too low**: Training is slow, may get stuck in local minima
+
+**Epochs:**
+- **Small datasets**: 10-20 epochs
+- **Medium datasets**: 5-10 epochs
+- **Large datasets**: 3-5 epochs
+- **Monitor**: Stop if validation loss stops improving
+
+**Batch Size:**
+- Automatically set based on preset
+- Larger batch = more stable gradients, more memory
+- Smaller batch = less memory, more gradient noise
+
+#### Monitoring Training
+
+**TensorBoard (Recommended):**
+```bash
+# Start TensorBoard in a separate terminal
+tensorboard --logdir runs
+
+# Open browser to http://localhost:6006
+# View:
+# - Training loss over time
+# - Perplexity trends
+# - Learning rate schedule
+```
+
+**Key Metrics to Watch:**
+- **Loss**: Should decrease steadily
+- **Perplexity**: Lower is better (aim for <50 for good models)
+- **Learning Rate**: Should follow cosine schedule
+- **Gradient Norm**: Should be stable (clipped at 1.0)
+
+**Early Stopping:**
+- Monitor validation loss
+- Stop if validation loss doesn't improve for 3-5 epochs
+- Save best model automatically (already implemented)
+
+### Model Evaluation
+
+#### Evaluation on Test Set (Recommended)
+
+**Complete Evaluation Command:**
+```bash
+python comprehensive_evaluation.py \
+    --checkpoint ./checkpoints/best_model.pt \
+    --preset medium \
+    --test-data data/sample_text_test.txt \
+    --train-data data/sample_text_train.txt \
+    --output evaluation_results.json
+```
+
+**Why Use Separate Test Set?**
+- **Realistic Metrics**: Shows how model performs on unseen data
+- **Generalization**: Tests model's ability to generalize
+- **Fair Comparison**: Allows fair comparison between different models
+
+#### Evaluation Metrics Explained
+
+**1. Perplexity**
+- **What it is**: Average uncertainty in next-token prediction
+- **Lower is better**: Lower perplexity = better predictions
+- **Interpretation**:
+  - < 20: Excellent
+  - 20-50: Good
+  - 50-100: Fair
+  - > 100: Needs improvement
+- **Note**: Test perplexity will be higher than training perplexity (this is normal!)
+
+**2. Accuracy Metrics**
+- **Top-1 Accuracy**: Percentage of correct next-token predictions
+- **Top-K Accuracy**: Percentage where correct token is in top-K predictions
+- **Interpretation**:
+  - Compare to random baseline (1/vocab_size)
+  - 2-5x better than random = learning
+  - 10x+ better = strong learning
+
+**3. Coherence Score**
+- **What it is**: How confident the model is in its predictions
+- **Range**: 0.0 to 1.0
+- **Interpretation**:
+  - > 0.5: High coherence
+  - 0.2-0.5: Moderate coherence
+  - < 0.2: Low coherence (normal for small vocabularies)
+
+**4. Repetition Metrics**
+- **Unique Tokens Ratio**: Percentage of unique tokens in generated text
+- **Interpretation**:
+  - > 0.5: Good diversity
+  - 0.2-0.5: Moderate diversity
+  - < 0.2: High repetition
+
+**5. Generation Quality**
+- **Average Length**: Average tokens per generation
+- **Unique Ratio**: Diversity in generated text
+- **Success Rate**: Percentage of successful generations
+
+#### Understanding Evaluation Results
+
+**Expected Behavior:**
+
+1. **Test Metrics vs Training Metrics:**
+   - Test perplexity > Training perplexity ✓ (Normal)
+   - Test accuracy < Training accuracy ✓ (Normal)
+   - This indicates realistic evaluation on unseen data
+
+2. **Small Vocabulary Effects:**
+   - Low coherence scores are normal (< 0.2)
+   - Repetition metrics may be limited
+   - Consider BPE or word-level tokenization for improvement
+
+3. **Small Dataset Effects:**
+   - Higher variance in metrics
+   - May show overfitting (large train/test gap)
+   - Use larger datasets for better results
+
+**Red Flags:**
+- Test perplexity much higher than training (>2x) = Overfitting
+- Accuracy near random baseline = Model not learning
+- Coherence score = 0 = Model completely uncertain
+
+### Best Practices
+
+#### Training Best Practices
+
+1. **Always Use Data Split:**
+   ```bash
+   --val-split 0.1 --test-split 0.1 --save-splits
+   ```
+
+2. **Use Consistent Random Seed:**
+   ```bash
+   --seed 42  # For reproducibility
+   ```
+
+3. **Monitor Training Progress:**
+   - Use TensorBoard to track metrics
+   - Watch for overfitting (validation loss stops decreasing)
+   - Save checkpoints regularly
+
+4. **Start Small:**
+   - Begin with `tiny` or `small` preset
+   - Verify everything works
+   - Scale up gradually
+
+5. **Hyperparameter Tuning:**
+   - Adjust learning rate if training is unstable
+   - Increase epochs if loss is still decreasing
+   - Use validation set for hyperparameter selection
+
+#### Evaluation Best Practices
+
+1. **Always Evaluate on Separate Test Set:**
+   ```bash
+   --test-data data/sample_text_test.txt
+   --train-data data/sample_text_train.txt
+   ```
+
+2. **Use Tokenizer Consistency:**
+   - Provide `--train-data` to ensure vocabulary matches
+   - Prevents vocabulary mismatch errors
+
+3. **Save Evaluation Results:**
+   ```bash
+   --output evaluation_results.json
+   ```
+
+4. **Compare Multiple Models:**
+   - Use same test set for fair comparison
+   - Document hyperparameters used
+   - Track results over time
+
+5. **Interpret Results Correctly:**
+   - Lower test metrics are expected and good
+   - Indicates realistic evaluation
+   - Shows generalization ability
+
+### Advanced Topics
+
+#### Custom Training Configuration
+
+For advanced users, you can modify training parameters directly in the code:
+
+```python
+from src.training.trainer import Trainer
+from src.utils.config_presets import get_model_config, get_training_config
+
+# Get base config
+model_config = get_model_config(preset='medium', vocab_size=50000)
+train_config = get_training_config(preset='medium')
+
+# Customize
+train_config['batch_size'] = 32
+train_config['seq_len'] = 512
+```
+
+#### Distributed Training
+
+For multi-GPU training (future feature):
+```python
+# Will be available in future versions
+trainer = Trainer(..., use_ddp=True, num_gpus=4)
+```
+
+#### Fine-tuning Pre-trained Models
+
+```bash
+# Load pre-trained checkpoint and continue training
+python examples/train_model.py \
+    --preset medium \
+    --data new_data.txt \
+    --resume-from ./checkpoints/pretrained_model.pt
+```
+
+#### Evaluation on Custom Metrics
+
+You can extend the evaluation script to add custom metrics:
+
+```python
+# In comprehensive_evaluation.py
+def compute_custom_metric(self, text: str) -> float:
+    # Your custom metric here
+    pass
+```
+
+### Common Workflows
+
+#### Workflow 1: Quick Test
+```bash
+# 1. Train small model
+python examples/train_model.py --preset tiny --epochs 5
+
+# 2. Evaluate
+python comprehensive_evaluation.py --checkpoint ./checkpoints/best_model.pt --preset tiny
+
+# 3. Generate sample
+python examples/generate_text.py --checkpoint ./checkpoints/best_model.pt --prompt "Hello"
+```
+
+#### Workflow 2: Production Training
+```bash
+# 1. Prepare data and split
+python examples/train_model.py \
+    --preset medium \
+    --epochs 20 \
+    --data data/large_corpus.txt \
+    --val-split 0.1 \
+    --test-split 0.1 \
+    --save-splits \
+    --seed 42
+
+# 2. Monitor training (separate terminal)
+tensorboard --logdir runs
+
+# 3. Evaluate on test set
+python comprehensive_evaluation.py \
+    --checkpoint ./checkpoints/best_model.pt \
+    --preset medium \
+    --test-data data/large_corpus_test.txt \
+    --train-data data/large_corpus_train.txt \
+    --output final_evaluation.json
+
+# 4. Generate production samples
+python examples/generate_text.py \
+    --checkpoint ./checkpoints/best_model.pt \
+    --preset medium \
+    --prompt "Your prompt here" \
+    --max-tokens 200 \
+    --temperature 0.8
+```
+
+#### Workflow 3: Hyperparameter Tuning
+```bash
+# Train multiple models with different hyperparameters
+for lr in 1e-4 3e-4 5e-4; do
+    python examples/train_model.py \
+        --preset small \
+        --epochs 10 \
+        --lr $lr \
+        --data data/sample_text.txt \
+        --val-split 0.1 \
+        --test-split 0.1 \
+        --save-splits
+done
+
+# Evaluate all models
+for checkpoint in checkpoints/best_model_*.pt; do
+    python comprehensive_evaluation.py \
+        --checkpoint $checkpoint \
+        --preset small \
+        --test-data data/sample_text_test.txt \
+        --output "eval_$(basename $checkpoint).json"
+done
+```
+
+### Troubleshooting Training and Evaluation
+
+**Training Issues:**
+
+1. **Loss Not Decreasing:**
+   - Check learning rate (may be too low)
+   - Verify data is loaded correctly
+   - Check if model is too small for dataset
+
+2. **Loss Exploding:**
+   - Learning rate too high
+   - Reduce learning rate or use gradient clipping
+   - Check for NaN values in data
+
+3. **Out of Memory:**
+   - Use smaller preset (`tiny` or `small`)
+   - Reduce batch size
+   - Enable gradient checkpointing
+
+4. **Overfitting:**
+   - Increase dataset size
+   - Add more dropout
+   - Use early stopping
+   - Regularize more (weight decay)
+
+**Evaluation Issues:**
+
+1. **Vocabulary Mismatch:**
+   - Always provide `--train-data` when evaluating
+   - Ensures tokenizer uses same vocabulary
+
+2. **Metrics Too Low:**
+   - This is normal for test set!
+   - Lower metrics indicate realistic evaluation
+   - Compare to random baseline, not training metrics
+
+3. **File Not Found Errors:**
+   - Use `--save-splits` during training
+   - Check file paths are correct
+   - Verify files exist before evaluation
+
+### Summary
+
+**Training Checklist:**
+- [ ] Data prepared and placed in `data/` directory
+- [ ] Appropriate model preset selected
+- [ ] Data split configured (`--val-split`, `--test-split`)
+- [ ] `--save-splits` used to save test set
+- [ ] Training monitored with TensorBoard
+- [ ] Best checkpoint saved
+
+**Evaluation Checklist:**
+- [ ] Using separate test set (`--test-data`)
+- [ ] Providing training data for tokenizer (`--train-data`)
+- [ ] Results saved to JSON (`--output`)
+- [ ] Metrics interpreted correctly (lower is expected)
+- [ ] Results documented for comparison
+
+**Remember:**
+- Always use a separate test set for final evaluation
+- Lower test metrics are expected and indicate realistic evaluation
+- Monitor training to catch issues early
+- Save all results for future comparison
+
 ### Troubleshooting
 
 **GPU Not Detected / CUDA Not Available:**
