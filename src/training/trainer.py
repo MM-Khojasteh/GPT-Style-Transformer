@@ -155,7 +155,8 @@ class Trainer:
                 self.amp_dtype = torch.bfloat16
             else:
                 self.amp_dtype = torch.float16
-            self.scaler = torch.cuda.amp.GradScaler(enabled=(amp_dtype == 'float16'))
+            # Use new PyTorch 2.5+ API for GradScaler
+            self.scaler = torch.amp.GradScaler('cuda', enabled=(amp_dtype == 'float16'))
         else:
             self.scaler = None
         
@@ -233,7 +234,8 @@ class Trainer:
         
         # Forward pass with mixed precision
         if self.use_amp:
-            with torch.cuda.amp.autocast(dtype=self.amp_dtype):
+            # Use new PyTorch 2.5+ API for autocast
+            with torch.amp.autocast('cuda', dtype=self.amp_dtype):
                 loss = self.compute_loss(batch)
         else:
             loss = self.compute_loss(batch)

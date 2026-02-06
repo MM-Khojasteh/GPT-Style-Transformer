@@ -2,14 +2,20 @@
 
 import os
 import torch
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union
+
+# For type hints - use new API if available, fallback to old for compatibility
+try:
+    GradScalerType = torch.amp.GradScaler
+except AttributeError:
+    GradScalerType = torch.cuda.amp.GradScaler
 
 
 def save_checkpoint(
     path: str,
     model: torch.nn.Module,
     optimizer: Optional[torch.optim.Optimizer] = None,
-    scaler: Optional[torch.cuda.amp.GradScaler] = None,
+    scaler: Optional[GradScalerType] = None,
     global_step: int = 0,
     epoch: int = 0,
     best_loss: float = float('inf'),
@@ -52,7 +58,7 @@ def load_checkpoint(
     path: str,
     model: torch.nn.Module,
     optimizer: Optional[torch.optim.Optimizer] = None,
-    scaler: Optional[torch.cuda.amp.GradScaler] = None
+    scaler: Optional[GradScalerType] = None
 ) -> Dict[str, Any]:
     """Load training checkpoint.
     
