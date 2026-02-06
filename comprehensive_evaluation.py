@@ -196,14 +196,18 @@ class ModelEvaluator:
             'unique_tokens': unique_tokens
         }
     
-    def compute_coherence_score(self, text: str, context_window: int = 10) -> float:
-        """Compute coherence score based on prediction confidence."""
+    def compute_coherence_score(self, text: str, context_window: int = 10) -> Dict[str, float]:
+        """Compute coherence score based on prediction confidence.
+        
+        Returns normalized score (0-1) where 1 is perfect coherence.
+        """
         tokens = self.tokenizer.encode(text)
         
         if len(tokens) < context_window + 1:
-            return 0.0
+            return {'coherence_score': 0.0, 'avg_confidence': 0.0, 'normalized_score': 0.0}
         
         confidences = []
+        vocab_size = self.tokenizer.vocab_size
         
         with torch.no_grad():
             for i in range(context_window, len(tokens)):
@@ -218,7 +222,21 @@ class ModelEvaluator:
                 confidence = probs[target].item()
                 confidences.append(confidence)
         
-        return np.mean(confidences) if confidences else 0.0
+        if not confidences:
+            return {'coherence_score': 0.0, 'avg_confidence': 0.0, 'normalized_score': 0.0}
+        
+        avg_confidence = np.mean(confidences)
+        # Normalize: random baseline is 1/vocab_size, perfect is 1.0
+        random_baseline = 1.0 / vocab_size
+        normalized_score = (avg_confidence - random_baseline) / (1.0 - random_baseline)
+        normalized_score = max(0.0, min(1.0, normalized_score))  # Clamp to [0, 1]
+        
+        return {
+            'coherence_score': normalized_score,
+            'avg_confidence': avg_confidence,
+            'normalized_score': normalized_score,
+            'random_baseline': random_baseline
+        }
     
     def test_generation_quality(
         self, 
@@ -363,7 +381,8 @@ class ModelEvaluator:
         results = {
             'timestamp': datetime.now().isoformat(),
             'test_data_length': len(test_text),
-            'test_tokens': len(self.tokenizer.encode(test_text))
+            'test_tokens': len(self.tokenizer.encode(test_text)),
+            'vocab_size': self.tokenizer.vocab_size
         }
         
         # 1. Perplexity and Loss
@@ -401,9 +420,12 @@ class ModelEvaluator:
         
         # 4. Coherence Score
         print("\n[4/7] Computing Coherence Score...")
-        coherence = self.compute_coherence_score(test_text)
-        results['coherence_score'] = coherence
-        print(f"  ✓ Coherence Score: {coherence:.4f}")
+        coherence_metrics = self.compute_coherence_score(test_text)
+        results['coherence'] = coherence_metrics
+        coherence_score = coherence_metrics['coherence_score']
+        print(f"  ✓ Coherence Score (normalized): {coherence_score:.4f}")
+        print(f"  ✓ Average Confidence: {coherence_metrics['avg_confidence']:.4f}")
+        print(f"  ✓ Random Baseline: {coherence_metrics['random_baseline']:.4f}")
         
         # 5. Prediction Distribution Analysis
         print("\n[5/7] Analyzing Prediction Distribution...")
@@ -446,12 +468,28 @@ def print_evaluation_report(results: Dict[str, any]):
     print("=" * 70)
     
     print(f"\n📊 Core Metrics:")
-    print(f"  • Perplexity: {results['perplexity']:.4f}")
+    perplexity = results['perplexity']
+    print(f"  • Perplexity: {perplexity:.4f}", end="")
+    if perplexity < 20:
+        print(" ✓ (Excellent)")
+    elif perplexity < 50:
+        print(" ✓ (Good)")
+    elif perplexity < 100:
+        print(" ⚠ (Fair)")
+    else:
+        print(" ✗ (Needs improvement)")
     print(f"  • Average Loss: {results['average_loss']:.4f}")
     
     print(f"\n🎯 Accuracy Metrics:")
     acc = results['accuracy']
-    print(f"  • Top-1 Accuracy: {acc['top1']*100:.2f}%")
+    vocab_size = results.get('vocab_size', 36)
+    random_baseline = 1.0 / vocab_size * 100
+    
+    print(f"  • Top-1 Accuracy: {acc['top1']*100:.2f}% (Random: {random_baseline:.2f}%)", end="")
+    if acc['top1'] > random_baseline / 100 * 2:
+        print(" ✓")
+    else:
+        print(" ⚠")
     print(f"  • Top-3 Accuracy: {acc['top3']*100:.2f}%")
     print(f"  • Top-5 Accuracy: {acc['top5']*100:.2f}%")
     print(f"  • Top-10 Accuracy: {acc['top10']*100:.2f}%")
@@ -464,8 +502,24 @@ def print_evaluation_report(results: Dict[str, any]):
     
     print(f"\n🔍 Model Characteristics:")
     entropy = results['entropy']
-    print(f"  • Average Entropy: {entropy['avg_entropy']:.4f}")
-    print(f"  • Coherence Score: {results['coherence_score']:.4f}")
+    max_entropy = np.log(results.get('vocab_size', 36))  # Maximum entropy for uniform distribution
+    entropy_ratio = entropy['avg_entropy'] / max_entropy if max_entropy > 0 else 0
+    print(f"  • Average Entropy: {entropy['avg_entropy']:.4f} (Max: {max_entropy:.4f}, Ratio: {entropy_ratio:.2%})")
+    
+    coherence = results.get('coherence', {})
+    if isinstance(coherence, dict):
+        coherence_score = coherence.get('coherence_score', 0.0)
+        print(f"  • Coherence Score (normalized): {coherence_score:.4f}", end="")
+        if coherence_score > 0.5:
+            print(" ✓ (High coherence)")
+        elif coherence_score > 0.2:
+            print(" ✓ (Moderate coherence)")
+        else:
+            print(" ⚠ (Low coherence)")
+        print(f"  • Average Confidence: {coherence.get('avg_confidence', 0.0):.4f}")
+        print(f"  • Random Baseline: {coherence.get('random_baseline', 0.0):.4f}")
+    else:
+        print(f"  • Coherence Score: {coherence:.4f}")
     
     if results.get('generation_quality'):
         gen_qual = results['generation_quality']
@@ -477,7 +531,14 @@ def print_evaluation_report(results: Dict[str, any]):
     if results.get('repetition_metrics'):
         rep = results['repetition_metrics']
         print(f"\n🔄 Repetition Analysis:")
-        print(f"  • Unique Tokens Ratio: {rep['unique_tokens_ratio']:.4f}")
+        unique_ratio = rep['unique_tokens_ratio']
+        print(f"  • Unique Tokens Ratio: {unique_ratio:.4f}", end="")
+        if unique_ratio > 0.5:
+            print(" ✓ (Good diversity)")
+        elif unique_ratio > 0.2:
+            print(" ⚠ (Moderate diversity)")
+        else:
+            print(" ✗ (High repetition)")
         print(f"  • Max Repetition Length: {rep['max_repetition_length']}")
         print(f"  • Average Repetition: {rep['avg_repetition_length']:.2f}")
     
