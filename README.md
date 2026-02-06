@@ -137,6 +137,27 @@ python examples/train_model.py --preset large --epochs 10
 - `--data`: Path to training data file (default: `data/sample_text.txt`)
 - `--epochs`: Number of training epochs (default: 10)
 - `--lr`: Learning rate (default: 3e-4)
+- `--val-split`: Validation split ratio (default: 0.1, set to 0.0 to disable)
+- `--test-split`: Test split ratio (default: 0.1, set to 0.0 to disable)
+- `--save-splits`: Save train/validation/test splits to separate files
+- `--seed`: Random seed for reproducibility (default: 42)
+
+**Recommended Training with Data Split:**
+```bash
+# Train with data split and save splits to files
+python examples/train_model.py \
+    --preset medium \
+    --epochs 10 \
+    --data data/sample_text.txt \
+    --val-split 0.1 \
+    --test-split 0.1 \
+    --save-splits
+
+# This will create:
+# - data/sample_text_train.txt (80% of data)
+# - data/sample_text_val.txt (10% of data)
+# - data/sample_text_test.txt (10% of data)
+```
 
 **Training Output:**
 - Model checkpoints are saved to `./checkpoints/`
@@ -146,6 +167,24 @@ python examples/train_model.py --preset large --epochs 10
 ### Step 3: Evaluate Model Performance
 
 Evaluate your trained model with comprehensive metrics:
+
+**Recommended: Evaluate on Separate Test Set**
+
+```bash
+# If you used --save-splits during training, evaluate on test set:
+python comprehensive_evaluation.py \
+    --checkpoint ./checkpoints/best_model.pt \
+    --preset medium \
+    --test-data data/sample_text_test.txt \
+    --train-data data/sample_text_train.txt
+
+# This ensures:
+# - Realistic evaluation on unseen data
+# - Tokenizer consistency with training
+# - Overlap detection between train/test sets
+```
+
+**Other Evaluation Options:**
 
 ```bash
 # Comprehensive evaluation with all metrics
@@ -158,16 +197,19 @@ python comprehensive_evaluation.py \
 python comprehensive_evaluation.py \
     --checkpoint ./checkpoints/best_model.pt \
     --preset medium \
-    --test-data data/sample_text.txt \
+    --test-data data/sample_text_test.txt \
+    --train-data data/sample_text_train.txt \
     --output evaluation_results.json
 
 # Use custom prompts for generation testing
 python comprehensive_evaluation.py \
     --checkpoint ./checkpoints/best_model.pt \
     --preset medium \
-    --test-data data/sample_text.txt \
+    --test-data data/sample_text_test.txt \
     --prompts "The transformer" "GPT models" "Training large"
 ```
+
+**Note:** If you evaluate on data that includes training examples, metrics will be higher but less realistic. For proper evaluation, always use a separate test set that wasn't seen during training.
 
 **Evaluation Metrics Included:**
 - **Perplexity**: Model's prediction uncertainty
@@ -182,9 +224,16 @@ python comprehensive_evaluation.py \
 - `--checkpoint`: Path to model checkpoint (default: `./checkpoints/best_model.pt`)
 - `--preset`: Model preset (should match training preset)
 - `--test-data`: Path to test data file (default: `data/sample_text.txt`)
+- `--train-data`: Path to training data file (optional, for tokenizer consistency and overlap detection)
 - `--seq-len`: Sequence length for evaluation (default: 256)
 - `--output`: Path to save JSON results (optional)
 - `--prompts`: Custom prompts for generation testing (optional)
+
+**Understanding Evaluation Results:**
+- Lower metrics on test set are **expected** and indicate realistic evaluation
+- If test set contains unseen data, metrics will be lower than training metrics
+- This is normal and shows the model's generalization ability
+- For best results, always use a separate test set that wasn't seen during training
 
 ### Step 4: Generate Text
 
@@ -255,11 +304,23 @@ python check_gpu.py
 # 2. Install dependencies
 pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
 
-# 3. Train a small model for testing
-python examples/train_model.py --preset small --epochs 5 --data data/sample_text.txt
+# 3. Train a model with data split (recommended)
+python examples/train_model.py \
+    --preset small \
+    --epochs 5 \
+    --data data/sample_text.txt \
+    --val-split 0.1 \
+    --test-split 0.1 \
+    --save-splits
 
-# 4. Evaluate model performance comprehensively
-python comprehensive_evaluation.py --checkpoint ./checkpoints/best_model.pt --preset small
+# This creates: data/sample_text_train.txt, data/sample_text_val.txt, data/sample_text_test.txt
+
+# 4. Evaluate model performance on test set (realistic evaluation)
+python comprehensive_evaluation.py \
+    --checkpoint ./checkpoints/best_model.pt \
+    --preset small \
+    --test-data data/sample_text_test.txt \
+    --train-data data/sample_text_train.txt
 
 # 5. Generate text from the trained model
 python examples/generate_text.py --checkpoint ./checkpoints/best_model.pt --prompt "The transformer"

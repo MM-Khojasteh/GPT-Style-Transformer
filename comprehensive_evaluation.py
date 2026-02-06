@@ -242,15 +242,54 @@ class ModelEvaluator:
         self, 
         prompts: List[str], 
         num_samples: int = 5,
-        max_tokens: int = 100
+        max_tokens: int = 100,
+        temperature: Optional[float] = None,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None
     ) -> Dict[str, any]:
-        """Test generation quality with multiple prompts."""
+        """Test generation quality with multiple prompts.
+        
+        Args:
+            prompts: List of prompts to generate from
+            num_samples: Number of samples per prompt
+            max_tokens: Maximum tokens to generate
+            temperature: Sampling temperature (auto if None)
+            top_k: Top-k sampling (auto if None)
+            top_p: Top-p sampling (auto if None)
+        """
         results = {
             'generations': [],
             'avg_length': 0.0,
             'avg_unique_ratio': 0.0,
             'successful_generations': 0
         }
+        
+        # Adaptive generation parameters based on vocabulary size
+        vocab_size = self.tokenizer.vocab_size
+        if temperature is None:
+            # For small vocabularies, use higher temperature to increase diversity
+            if vocab_size < 100:
+                temperature = 0.9
+            elif vocab_size < 1000:
+                temperature = 0.8
+            else:
+                temperature = 0.7
+        
+        if top_k is None:
+            # For small vocabularies, use smaller top_k
+            if vocab_size < 50:
+                top_k = min(20, vocab_size)
+            elif vocab_size < 200:
+                top_k = min(40, vocab_size)
+            else:
+                top_k = min(50, vocab_size)
+        
+        if top_p is None:
+            # For small vocabularies, use slightly higher top_p
+            if vocab_size < 100:
+                top_p = 0.95
+            else:
+                top_p = 0.9
         
         total_length = 0
         total_unique_ratio = 0
@@ -265,9 +304,9 @@ class ModelEvaluator:
                     self.model,
                     prompt_tokens,
                     max_new_tokens=max_tokens,
-                    temperature=0.7,
-                    top_k=min(50, self.tokenizer.vocab_size),
-                    top_p=0.9,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
                     device=str(self.device),
                     use_cache=True
                 )
@@ -437,11 +476,21 @@ class ModelEvaluator:
         # 6. Generation Quality Tests
         if prompts:
             print("\n[6/7] Testing Generation Quality...")
-            gen_results = self.test_generation_quality(prompts, num_samples=len(prompts))
+            # Use adaptive parameters for small vocabularies
+            vocab_size = self.tokenizer.vocab_size
+            gen_results = self.test_generation_quality(
+                prompts, 
+                num_samples=len(prompts),
+                temperature=None,  # Auto-adapt
+                top_k=None,  # Auto-adapt
+                top_p=None  # Auto-adapt
+            )
             results['generation_quality'] = gen_results
             print(f"  ✓ Successful Generations: {gen_results['successful_generations']}/{len(prompts)}")
             print(f"  ✓ Average Length: {gen_results['avg_length']:.1f} tokens")
             print(f"  ✓ Average Unique Ratio: {gen_results['avg_unique_ratio']:.4f}")
+            if vocab_size < 100:
+                print(f"  ℹ Using adaptive generation parameters for small vocabulary (size={vocab_size})")
         else:
             results['generation_quality'] = None
         
@@ -509,6 +558,10 @@ def print_evaluation_report(results: Dict[str, any]):
     coherence = results.get('coherence', {})
     if isinstance(coherence, dict):
         coherence_score = coherence.get('coherence_score', 0.0)
+        avg_confidence = coherence.get('avg_confidence', 0.0)
+        random_baseline = coherence.get('random_baseline', 0.0)
+        vocab_size = results.get('vocab_size', 36)
+        
         print(f"  • Coherence Score (normalized): {coherence_score:.4f}", end="")
         if coherence_score > 0.5:
             print(" ✓ (High coherence)")
@@ -516,8 +569,14 @@ def print_evaluation_report(results: Dict[str, any]):
             print(" ✓ (Moderate coherence)")
         else:
             print(" ⚠ (Low coherence)")
-        print(f"  • Average Confidence: {coherence.get('avg_confidence', 0.0):.4f}")
-        print(f"  • Random Baseline: {coherence.get('random_baseline', 0.0):.4f}")
+        print(f"  • Average Confidence: {avg_confidence:.4f}")
+        print(f"  • Random Baseline: {random_baseline:.4f}")
+        
+        # Add explanation for small vocabularies
+        if vocab_size < 100:
+            improvement_ratio = avg_confidence / random_baseline if random_baseline > 0 else 0
+            print(f"  ℹ Note: With small vocabulary (size={vocab_size}), low coherence is expected.")
+            print(f"    Model confidence ({avg_confidence:.4f}) is {improvement_ratio:.1f}x better than random baseline.")
     else:
         print(f"  • Coherence Score: {coherence:.4f}")
     
@@ -530,6 +589,7 @@ def print_evaluation_report(results: Dict[str, any]):
     
     if results.get('repetition_metrics'):
         rep = results['repetition_metrics']
+        vocab_size = results.get('vocab_size', 36)
         print(f"\n🔄 Repetition Analysis:")
         unique_ratio = rep['unique_tokens_ratio']
         print(f"  • Unique Tokens Ratio: {unique_ratio:.4f}", end="")
@@ -541,6 +601,68 @@ def print_evaluation_report(results: Dict[str, any]):
             print(" ✗ (High repetition)")
         print(f"  • Max Repetition Length: {rep['max_repetition_length']}")
         print(f"  • Average Repetition: {rep['avg_repetition_length']:.2f}")
+        
+        # Add explanation for small vocabularies
+        if vocab_size < 100:
+            expected_ratio = rep.get('unique_tokens', 0) / vocab_size if vocab_size > 0 else 0
+            print(f"  ℹ Note: With vocabulary size {vocab_size}, maximum possible unique ratio is ~{expected_ratio:.2f}")
+            print(f"    Consider using larger dataset or different tokenization for better diversity.")
+    
+    # Add summary and recommendations
+    print("\n" + "=" * 70)
+    print("SUMMARY & RECOMMENDATIONS")
+    print("=" * 70)
+    
+    vocab_size = results.get('vocab_size', 36)
+    test_tokens = results.get('test_tokens', 0)
+    
+    # Dataset size analysis
+    if test_tokens < 1000:
+        print("\n📊 Dataset Analysis:")
+        print(f"  • Small dataset detected ({test_tokens} tokens)")
+        print("  • Recommendations:")
+        print("    - Use larger training dataset for better generalization")
+        print("    - Consider data augmentation techniques")
+        print("    - Split data into train/validation/test sets")
+    
+    # Vocabulary size analysis
+    if vocab_size < 100:
+        print("\n📚 Vocabulary Analysis:")
+        print(f"  • Small vocabulary detected ({vocab_size} tokens)")
+        print("  • This is expected for character-level tokenization")
+        print("  • Recommendations:")
+        print("    - Consider BPE or word-level tokenization for larger vocabularies")
+        print("    - Low coherence scores are normal with small vocabularies")
+        print("    - Repetition metrics may be limited by vocabulary size")
+    
+    # Model performance summary
+    perplexity = results['perplexity']
+    top1_acc = results['accuracy']['top1']
+    
+    print("\n🎯 Model Performance Summary:")
+    if perplexity < 20:
+        print("  ✓ Excellent perplexity - model is well-trained")
+    elif perplexity < 50:
+        print("  ✓ Good perplexity - model shows solid performance")
+    else:
+        print("  ⚠ Perplexity could be improved with more training or better hyperparameters")
+    
+    random_baseline = 1.0 / vocab_size
+    if top1_acc > random_baseline * 5:
+        print("  ✓ Strong accuracy improvement over random baseline")
+    elif top1_acc > random_baseline * 2:
+        print("  ✓ Moderate accuracy improvement over random baseline")
+    else:
+        print("  ⚠ Accuracy improvement over baseline could be better")
+    
+    # Add note about evaluation on unseen data
+    test_tokens = results.get('test_tokens', 0)
+    if test_tokens > 0:
+        print("\n📝 Evaluation Notes:")
+        print("  • Lower metrics on test set are expected and indicate realistic evaluation")
+        print("  • If test set contains unseen data, metrics will be lower than training metrics")
+        print("  • This is normal and shows the model's generalization ability")
+        print("  • For best results, use a separate test set that wasn't seen during training")
     
     print("\n" + "=" * 70)
 
@@ -562,6 +684,8 @@ def main():
                         help='Path to save JSON results (optional)')
     parser.add_argument('--prompts', type=str, nargs='+', default=None,
                         help='Custom prompts for generation testing')
+    parser.add_argument('--train-data', type=str, default=None,
+                        help='Path to training data (for tokenizer consistency and overlap detection)')
     args = parser.parse_args()
     
     print("=" * 70)
@@ -575,11 +699,47 @@ def main():
     
     print(f"Test Data: {args.test_data}")
     print(f"  Length: {len(test_text)} characters")
+    
+    # Check for potential overlap with training data
+    if args.train_data:
+        try:
+            with open(args.train_data, 'r', encoding='utf-8') as f:
+                train_text = f.read()
+            
+            # Simple overlap detection: check if test data is subset of training data
+            test_tokens = set(test_text.split())
+            train_tokens = set(train_text.split())
+            overlap_ratio = len(test_tokens & train_tokens) / len(test_tokens) if len(test_tokens) > 0 else 0
+            
+            if overlap_ratio > 0.8:
+                print(f"  ⚠ Warning: High overlap detected with training data ({overlap_ratio:.1%})")
+                print(f"    This may lead to overly optimistic evaluation results.")
+                print(f"    For realistic evaluation, use a separate test set.")
+            elif overlap_ratio > 0.5:
+                print(f"  ⚠ Note: Moderate overlap with training data ({overlap_ratio:.1%})")
+        except FileNotFoundError:
+            print(f"  ℹ Training data file not found: {args.train_data}")
+            print(f"    Skipping overlap detection.")
+    
     print()
     
-    # Create tokenizer
-    tokenizer = CharTokenizer(test_text)
-    print(f"Tokenizer:")
+    # Create tokenizer - use training data if provided for consistency
+    if args.train_data:
+        try:
+            with open(args.train_data, 'r', encoding='utf-8') as f:
+                train_text = f.read()
+            # Combine train and test for tokenizer to ensure vocabulary consistency
+            combined_text = train_text + "\n" + test_text
+            tokenizer = CharTokenizer(combined_text)
+            print(f"Tokenizer (created from training + test data for consistency):")
+        except FileNotFoundError:
+            print(f"Warning: Training data file not found, using test data for tokenizer")
+            tokenizer = CharTokenizer(test_text)
+            print(f"Tokenizer:")
+    else:
+        tokenizer = CharTokenizer(test_text)
+        print(f"Tokenizer:")
+    
     print(f"  Vocabulary size: {tokenizer.vocab_size}")
     print(f"  Total tokens: {len(tokenizer.encode(test_text))}")
     print()

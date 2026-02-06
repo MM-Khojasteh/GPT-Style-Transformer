@@ -18,6 +18,7 @@ from src.utils.tokenizer import CharTokenizer
 from src.utils.device import get_device, print_gpu_info
 from src.utils.config_presets import get_model_config, get_training_config, estimate_model_size
 from src.optimizations.gradient_checkpoint import apply_gradient_checkpointing
+import random
 
 
 def main():
@@ -31,12 +32,26 @@ def main():
                         help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=3e-4,
                         help='Learning rate')
+    parser.add_argument('--val-split', type=float, default=0.1,
+                        help='Validation split ratio (0.0 to disable)')
+    parser.add_argument('--test-split', type=float, default=0.1,
+                        help='Test split ratio (0.0 to disable)')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducibility')
+    parser.add_argument('--save-splits', action='store_true',
+                        help='Save train/validation/test splits to separate files')
     args = parser.parse_args()
     
     print("=" * 70)
     print(f"Training GPT Model - {args.preset.upper()} Configuration")
     print("=" * 70)
     print()
+    
+    # Set random seed for reproducibility
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     
     # Load and prepare data
     with open(args.data, 'r', encoding='utf-8') as f:
@@ -48,6 +63,75 @@ def main():
     
     print(f"Vocabulary size: {tokenizer.vocab_size}")
     print(f"Total tokens: {len(data)}")
+    
+    # Split data into train/validation/test
+    if args.val_split > 0 or args.test_split > 0:
+        total_split = args.val_split + args.test_split
+        if total_split >= 1.0:
+            print("Warning: val_split + test_split >= 1.0, adjusting...")
+            args.val_split = args.val_split / total_split * 0.2
+            args.test_split = args.test_split / total_split * 0.2
+            total_split = 0.2
+        
+        # Shuffle data
+        data_shuffled = data.copy()
+        random.shuffle(data_shuffled)
+        
+        # Calculate split indices
+        n = len(data_shuffled)
+        val_start = int(n * (1 - total_split))
+        test_start = int(n * (1 - args.test_split)) if args.test_split > 0 else n
+        
+        train_data = data_shuffled[:val_start]
+        val_data = data_shuffled[val_start:test_start] if args.val_split > 0 else []
+        test_data = data_shuffled[test_start:] if args.test_split > 0 else []
+        
+        print(f"Data split:")
+        print(f"  Train: {len(train_data)} tokens ({len(train_data)/n*100:.1f}%)")
+        if args.val_split > 0:
+            print(f"  Validation: {len(val_data)} tokens ({len(val_data)/n*100:.1f}%)")
+        if args.test_split > 0:
+            print(f"  Test: {len(test_data)} tokens ({len(test_data)/n*100:.1f}%)")
+        
+        # Save splits to files if requested
+        if args.save_splits:
+            data_dir = Path(args.data).parent
+            base_name = Path(args.data).stem
+            
+            # Decode tokens back to text
+            train_text = tokenizer.decode(train_data)
+            if args.val_split > 0:
+                val_text = tokenizer.decode(val_data)
+            if args.test_split > 0:
+                test_text = tokenizer.decode(test_data)
+            
+            # Save train data
+            train_file = data_dir / f"{base_name}_train.txt"
+            with open(train_file, 'w', encoding='utf-8') as f:
+                f.write(train_text)
+            print(f"  ✓ Saved train data to: {train_file}")
+            
+            # Save validation data
+            if args.val_split > 0:
+                val_file = data_dir / f"{base_name}_val.txt"
+                with open(val_file, 'w', encoding='utf-8') as f:
+                    f.write(val_text)
+                print(f"  ✓ Saved validation data to: {val_file}")
+            
+            # Save test data
+            if args.test_split > 0:
+                test_file = data_dir / f"{base_name}_test.txt"
+                with open(test_file, 'w', encoding='utf-8') as f:
+                    f.write(test_text)
+                print(f"  ✓ Saved test data to: {test_file}")
+                print(f"  ℹ Use this file for evaluation: --test-data {test_file}")
+            print()
+        
+        # Use train data for training
+        data = train_data
+    else:
+        print("No data split (using all data for training)")
+    
     print()
     
     # Get model configuration from preset
