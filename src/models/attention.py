@@ -43,7 +43,7 @@ def apply_causal_mask(
 
 class MultiHeadAttention(nn.Module):
     """Multi-head self-attention with support for RoPE, ALiBi, Flash Attention, and KV caching.
-    
+
     Args:
         embed_dim: Embedding dimension
         num_heads: Number of attention heads
@@ -53,7 +53,11 @@ class MultiHeadAttention(nn.Module):
         use_rope: Whether to use Rotary Position Embedding
         use_alibi: Whether to use ALiBi positional encoding
         max_seq_len: Maximum sequence length for RoPE/ALiBi
-        use_flash_attn: Whether to use Flash Attention (if available)
+        use_flash_attn: Whether to use Flash Attention. When True, uses PyTorch's
+            native F.scaled_dot_product_attention which automatically selects the
+            optimal kernel (FlashAttention, Memory-Efficient Attention, or C++)
+            based on hardware and input size. Falls back to standard attention
+            when ALiBi is enabled (not compatible with SDPA's is_causal flag).
     """
     
     def __init__(
@@ -188,76 +192,40 @@ class MultiHeadAttention(nn.Module):
         Q: torch.Tensor,
         K: torch.Tensor,
         V: torch.Tensor,
-        causal_mask: bool = True,
-        block_size: int = 128
+        causal_mask: bool = True
     ) -> torch.Tensor:
-        """Flash Attention implementation (simplified version).
-        
-        This is a simplified block-wise Flash Attention. For production use,
-        consider using the flash-attn library.
-        
+        """Flash Attention using PyTorch's native scaled_dot_product_attention.
+
+        This uses optimized CUDA kernels (FlashAttention, Memory-Efficient Attention,
+        or C++ kernels) automatically based on hardware and input size. Available
+        since PyTorch 2.0.
+
         Args:
             Q: Query tensor of shape (batch_size, num_heads, seq_len, head_dim)
             K: Key tensor of shape (batch_size, num_heads, seq_len, head_dim)
             V: Value tensor of shape (batch_size, num_heads, seq_len, head_dim)
             causal_mask: Whether to apply causal masking
-            block_size: Block size for block-wise computation
-            
+
         Returns:
             Output tensor of shape (batch_size, num_heads, seq_len, head_dim)
         """
-        batch_size, num_heads, seq_len, head_dim = Q.shape
-        
-        # Initialize output and normalization
-        O = torch.zeros_like(Q)
-        L = torch.zeros(batch_size, num_heads, seq_len, 1, device=Q.device)
-        m = torch.full((batch_size, num_heads, seq_len, 1), float('-inf'), device=Q.device)
-        
-        # Process in blocks
-        for i in range(0, seq_len, block_size):
-            i_end = min(i + block_size, seq_len)
-            Q_block = Q[:, :, i:i_end, :]
-            
-            max_k_idx = i_end if causal_mask else seq_len
-            
-            for j in range(0, max_k_idx, block_size):
-                j_end = min(j + block_size, max_k_idx)
-                K_block = K[:, :, j:j_end, :]
-                V_block = V[:, :, j:j_end, :]
-                
-                # Compute scores for this block
-                scores = torch.matmul(Q_block, K_block.transpose(-2, -1)) / math.sqrt(head_dim)
-                
-                # Apply ALiBi if used
-                if self.alibi is not None:
-                    # Extract relevant bias
-                    bias = self.alibi.get_bias(seq_len, Q.device)
-                    bias_block = bias[:, i:i_end, j:j_end]
-                    scores = scores + bias_block.unsqueeze(0)
-                
-                # Apply causal mask
-                if causal_mask:
-                    # Only mask positions where j > i
-                    for q_idx in range(i, i_end):
-                        for k_idx in range(j, j_end):
-                            if k_idx > q_idx:
-                                rel_q = q_idx - i
-                                rel_k = k_idx - j
-                                scores[:, :, rel_q, rel_k] = float('-inf')
-                
-                # Update output using online softmax
-                m_new = torch.maximum(m[:, :, i:i_end], scores.max(dim=-1, keepdim=True)[0])
-                alpha = torch.exp(m[:, :, i:i_end] - m_new)
-                O[:, :, i:i_end, :] = O[:, :, i:i_end, :] * alpha + \
-                    torch.matmul(torch.exp(scores - m_new), V_block)
-                L[:, :, i:i_end] = L[:, :, i:i_end] * alpha + \
-                    torch.exp(scores - m_new).sum(dim=-1, keepdim=True)
-                m[:, :, i:i_end] = m_new
-        
-        # Normalize
-        O = O / (L + 1e-8)
-        
-        return O
+        # Note: ALiBi is not compatible with SDPA's is_causal flag
+        # When using ALiBi, fall back to standard attention path
+        if self.alibi is not None:
+            # Use standard attention which handles ALiBi correctly
+            output, _ = self._compute_attention(Q, K, V, causal_mask=causal_mask)
+            return output
+
+        # Use PyTorch's native optimized attention
+        # This automatically selects FlashAttention, Memory-Efficient Attention,
+        # or C++ implementation based on hardware and input characteristics
+        output = F.scaled_dot_product_attention(
+            Q, K, V,
+            attn_mask=None,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            is_causal=causal_mask
+        )
+        return output
     
     def forward(
         self,

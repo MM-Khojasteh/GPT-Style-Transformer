@@ -4,6 +4,73 @@
 
 All planned architecture enhancements have been successfully implemented. The codebase now includes comprehensive tools for optimizing model configurations, monitoring GPU usage, and scaling models efficiently.
 
+## Critical Fixes (Recent)
+
+### 1. ✅ Native Flash Attention Implementation
+**File**: `src/models/attention.py`
+
+**Problem**: Previous "Flash Attention" used nested Python loops - slower than standard attention.
+**Solution**: Replaced with PyTorch's native `F.scaled_dot_product_attention()`:
+- Automatically selects optimal kernel (FlashAttention, Memory-Efficient Attention, or C++)
+- Available since PyTorch 2.0
+- True O(n) memory complexity for attention
+
+**Code**:
+```python
+output = F.scaled_dot_product_attention(
+    Q, K, V,
+    dropout_p=self.attn_dropout.p if self.training else 0.0,
+    is_causal=causal_mask
+)
+```
+
+### 2. ✅ Vectorized MoE Forward Pass
+**File**: `src/models/feedforward.py`
+
+**Problem**: O(n) Python loops per expert - hundreds of thousands of iterations per forward pass.
+**Solution**: Fully vectorized using scatter/gather operations:
+- Uses `torch.index_add_` for efficient token routing
+- Load balancing loss also vectorized with `F.one_hot()`
+- Eliminates all per-token Python loops
+
+### 3. ✅ Proper Weight Decay Grouping
+**File**: `src/training/optimizers.py`
+
+**Problem**: Weight decay applied to all parameters including biases and norms - hurts training quality.
+**Solution**: Separate decay/no-decay parameter groups:
+- No decay on: biases, LayerNorm/RMSNorm, embeddings, positional encodings
+- Follows GPT-2/3 and LLaMA best practices
+- No GPU cost difference
+
+### 4. ✅ Fixed Scheduler Stepping
+**File**: `src/training/trainer.py`
+
+**Problem**: Scheduler stepped once per epoch instead of per optimizer step - incorrect warmup/cosine decay timing.
+**Solution**: Moved `scheduler.step()` to occur after each optimizer step (inside gradient accumulation block).
+
+### 5. ✅ Integrated Validation Loop
+**File**: `src/training/trainer.py`
+
+**Problem**: No validation during training - couldn't detect overfitting, best model saved by training loss.
+**Solution**:
+- Accepts `val_data` parameter for validation data
+- Validation runs at end of each epoch
+- Best model saved based on **validation loss** (when provided)
+- Validation metrics logged and tracked in history
+
+**Usage**:
+```python
+trainer = Trainer(
+    model=model,
+    train_data=train_data,
+    val_data=val_data,  # NEW: optional validation data
+    optimizer=optimizer,
+    ...
+)
+```
+
+---
+
 ## Completed Enhancements
 
 ### 1. ✅ Configuration Preset System

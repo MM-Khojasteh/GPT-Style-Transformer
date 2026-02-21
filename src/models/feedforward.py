@@ -246,56 +246,93 @@ class MixtureOfExperts(nn.Module):
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass.
-        
+
         Args:
             x: Input tensor of shape (batch_size, seq_len, dim)
-            
+
         Returns:
             output: Output tensor of shape (batch_size, seq_len, dim)
             load_balance_loss: Load balancing loss (scalar)
         """
         batch_size, seq_len, _ = x.shape
-        
+        num_tokens = batch_size * seq_len
+
         # Route tokens to experts
         expert_weights, expert_indices = self.router(x, top_k=self.top_k)
         # expert_weights: (batch_size, seq_len, top_k)
         # expert_indices: (batch_size, seq_len, top_k)
-        
+
         # Flatten for processing
-        x_flat = x.view(-1, self.dim)  # (batch_size * seq_len, dim)
-        expert_weights_flat = expert_weights.view(-1, self.top_k)  # (batch_size * seq_len, top_k)
-        expert_indices_flat = expert_indices.view(-1, self.top_k)  # (batch_size * seq_len, top_k)
-        
-        # Process through experts
-        output = torch.zeros_like(x_flat)
-        
-        for expert_idx in range(self.num_experts):
-            # Find tokens routed to this expert
-            mask = (expert_indices_flat == expert_idx).any(dim=1)  # (batch_size * seq_len,)
-            
-            if mask.any():
-                # Get tokens for this expert
-                expert_tokens = x_flat[mask]  # (num_tokens, dim)
-                
-                # Process through expert
-                expert_output = self.experts[expert_idx](expert_tokens)  # (num_tokens, dim)
-                
-                # Get weights for this expert
-                token_indices = torch.where(mask)[0]
-                for token_idx, global_idx in enumerate(token_indices):
-                    # Find which position in top_k this expert is
-                    expert_pos = (expert_indices_flat[global_idx] == expert_idx).nonzero(as_tuple=True)[0]
-                    if len(expert_pos) > 0:
-                        weight = expert_weights_flat[global_idx, expert_pos[0]]
-                        output[global_idx] += weight * expert_output[token_idx]
-        
+        x_flat = x.view(num_tokens, self.dim)  # (num_tokens, dim)
+        expert_weights_flat = expert_weights.view(num_tokens, self.top_k)  # (num_tokens, top_k)
+        expert_indices_flat = expert_indices.view(num_tokens, self.top_k)  # (num_tokens, top_k)
+
+        # Vectorized MoE computation using scatter/gather
+        output = self._compute_expert_outputs(x_flat, expert_weights_flat, expert_indices_flat, num_tokens)
+
         # Reshape back
         output = output.view(batch_size, seq_len, self.dim)
-        
+
         # Compute load balancing loss
         load_balance_loss = self._compute_load_balance_loss(expert_weights_flat, expert_indices_flat)
-        
+
         return output, load_balance_loss
+
+    def _compute_expert_outputs(
+        self,
+        x: torch.Tensor,
+        expert_weights: torch.Tensor,
+        expert_indices: torch.Tensor,
+        num_tokens: int
+    ) -> torch.Tensor:
+        """Compute expert outputs using vectorized scatter/gather operations.
+
+        Args:
+            x: Input tensor of shape (num_tokens, dim)
+            expert_weights: Expert weights of shape (num_tokens, top_k)
+            expert_indices: Expert indices of shape (num_tokens, top_k)
+            num_tokens: Number of tokens
+
+        Returns:
+            Output tensor of shape (num_tokens, dim)
+        """
+        # Create token indices repeated for each top-k position
+        token_indices = torch.arange(num_tokens, device=x.device).unsqueeze(1).expand(-1, self.top_k)
+        # token_indices: (num_tokens, top_k)
+
+        # Flatten everything for scatter operations
+        token_indices_flat = token_indices.reshape(-1)  # (num_tokens * top_k,)
+        expert_indices_flat = expert_indices.reshape(-1)  # (num_tokens * top_k,)
+        weights_flat = expert_weights.reshape(-1)  # (num_tokens * top_k,)
+
+        # Initialize output accumulator
+        output = torch.zeros(num_tokens, self.dim, device=x.device, dtype=x.dtype)
+
+        # For each expert, gather tokens, process, and scatter results back
+        # This still loops over experts but processes all tokens for each expert
+        # in a single batch (no per-token Python loops)
+        for expert_idx in range(self.num_experts):
+            # Find all (token_idx, k_idx) positions where this expert is selected
+            mask = expert_indices_flat == expert_idx  # (num_tokens * top_k,)
+
+            if mask.any():
+                # Get token indices and weights for this expert
+                expert_token_indices = token_indices_flat[mask]  # (num_tokens_for_expert,)
+                expert_weights_for_tokens = weights_flat[mask].unsqueeze(1)  # (num_tokens_for_expert, 1)
+
+                # Gather tokens for this expert (vectorized)
+                expert_tokens = x[expert_token_indices]  # (num_tokens_for_expert, dim)
+
+                # Process all tokens through this expert in one batch
+                expert_output = self.experts[expert_idx](expert_tokens)  # (num_tokens_for_expert, dim)
+
+                # Weight the output
+                weighted_output = expert_weights_for_tokens * expert_output  # (num_tokens_for_expert, dim)
+
+                # Scatter-add back to output (vectorized)
+                output.index_add_(0, expert_token_indices, weighted_output)
+
+        return output
     
     def _compute_load_balance_loss(
         self,
@@ -303,42 +340,41 @@ class MixtureOfExperts(nn.Module):
         expert_indices: torch.Tensor
     ) -> torch.Tensor:
         """Compute load balancing loss to encourage uniform expert usage.
-        
+
+        Uses vectorized operations for efficiency.
+
         Args:
             expert_weights: Expert weights of shape (num_tokens, top_k)
             expert_indices: Expert indices of shape (num_tokens, top_k)
-            
+
         Returns:
             Load balancing loss (scalar)
         """
         num_tokens = expert_weights.shape[0]
-        
-        # Compute fraction of tokens routed to each expert
-        expert_fraction = torch.zeros(self.num_experts, device=expert_weights.device)
-        for expert_idx in range(self.num_experts):
-            mask = (expert_indices == expert_idx).any(dim=1)
-            if mask.any():
-                # Average weight for this expert
-                expert_weights_for_expert = expert_weights[mask]
-                expert_indices_for_expert = expert_indices[mask]
-                
-                # Get weights for this expert
-                weights = []
-                for i in range(expert_weights_for_expert.shape[0]):
-                    pos = (expert_indices_for_expert[i] == expert_idx).nonzero(as_tuple=True)[0]
-                    if len(pos) > 0:
-                        weights.append(expert_weights_for_expert[i, pos[0]])
-                
-                if weights:
-                    expert_fraction[expert_idx] = sum(weights) / num_tokens
-        
+
+        # Vectorized computation of expert usage
+        # Create one-hot encoding: (num_tokens, top_k, num_experts)
+        expert_one_hot = F.one_hot(expert_indices, num_classes=self.num_experts).to(expert_weights.dtype)
+
+        # Weight the one-hot encoding by expert weights
+        # expert_weights: (num_tokens, top_k) -> (num_tokens, top_k, 1)
+        weighted_one_hot = expert_one_hot * expert_weights.unsqueeze(-1)
+
+        # Sum over top_k dimension to get total weight per expert per token
+        # (num_tokens, num_experts)
+        token_expert_weights = weighted_one_hot.sum(dim=1)
+
+        # Sum over tokens and normalize to get fraction
+        # (num_experts,)
+        expert_fraction = token_expert_weights.sum(dim=0) / num_tokens
+
         # Compute coefficient of variation
         mean_fraction = expert_fraction.mean()
         if mean_fraction > 0:
             cv = expert_fraction.std() / mean_fraction
         else:
             cv = torch.tensor(0.0, device=expert_weights.device)
-        
+
         # Load balancing loss is the coefficient of variation
         return self.load_balance_loss_weight * cv
 

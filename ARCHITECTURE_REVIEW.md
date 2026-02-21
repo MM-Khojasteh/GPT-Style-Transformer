@@ -4,6 +4,18 @@
 
 This is a from-scratch GPT implementation covering model architecture, training, evaluation, and generation. The codebase is modular, well-documented, and includes modern techniques (RoPE, GQA, SwiGLU, MoE). Below is an honest assessment of strengths, weaknesses, and actionable suggestions -- all GPU-budget-neutral.
 
+## Recent Updates (Fixed Issues)
+
+The following critical issues have been **resolved**:
+
+1. ✅ **Flash Attention** - Now uses PyTorch's native `F.scaled_dot_product_attention()` with automatic kernel selection
+2. ✅ **MoE Vectorization** - Forward pass and load balancing loss fully vectorized with scatter/gather operations
+3. ✅ **Weight Decay Groups** - Optimizer properly separates decay/no-decay parameters (biases, norms, embeddings excluded)
+4. ✅ **Scheduler Stepping** - Fixed to step per optimizer step (not per epoch) for correct warmup/cosine decay
+5. ✅ **Validation Loop** - Trainer now supports validation data and saves best model based on validation loss
+
+See the Weaknesses section below for details on each fix.
+
 ---
 
 ## Strengths
@@ -37,90 +49,104 @@ The 6 presets (tiny through xxl) have sensible scaling: embed_dim, heads, and la
 
 ## Weaknesses
 
-### 1. Flash Attention Implementation Is Not Usable (Critical)
+### 1. Flash Attention Implementation ~~Is Not Usable~~ ✅ FIXED
 
-The "flash attention" in `attention.py:186-260` is a Python-level block-wise implementation with **nested Python for-loops over query and key positions** (lines 241-246):
+~~The "flash attention" in `attention.py:186-260` is a Python-level block-wise implementation with **nested Python for-loops over query and key positions** (lines 241-246)...~~
+
+**Status**: Fixed. Replaced the Python loop-based implementation with PyTorch's native `F.scaled_dot_product_attention()`:
 
 ```python
-for q_idx in range(i, i_end):
-    for k_idx in range(j, j_end):
-        if k_idx > q_idx:
-            scores[:, :, rel_q, rel_k] = float('-inf')
+output = F.scaled_dot_product_attention(
+    Q, K, V,
+    attn_mask=None,
+    dropout_p=self.attn_dropout.p if self.training else 0.0,
+    is_causal=causal_mask
+)
 ```
 
-This is orders of magnitude slower than standard attention, not faster. Real Flash Attention gets its speed from fused CUDA kernels that avoid materializing the full attention matrix in HBM. This implementation materializes everything and adds Python loop overhead on top.
+This uses optimized CUDA kernels (FlashAttention, Memory-Efficient Attention, or C++) automatically based on hardware. Falls back to standard attention when ALiBi is enabled (not compatible with SDPA's `is_causal` flag).
 
-**Suggestion**: Either integrate `torch.nn.functional.scaled_dot_product_attention` (available since PyTorch 2.0, uses FlashAttention/memory-efficient kernels automatically, zero GPU cost change) or remove the `use_flash_attn` flag entirely to avoid misleading users. A one-line replacement in `_compute_attention` would give you real flash attention for free:
+### 2. MoE Forward Pass ~~Has O(n) Python Loops Per Expert~~ ✅ FIXED
+
+~~In `feedforward.py:272-290`, the MoE forward iterates over every expert with Python loops, and inside each expert's processing, iterates over individual tokens...~~
+
+**Status**: Fixed. Vectorized using `torch.index_add_` and scatter/gather operations:
 
 ```python
-output = F.scaled_dot_product_attention(Q, K, V, is_causal=True, dropout_p=self.attn_dropout.p if self.training else 0.0)
+# Gather tokens for this expert (vectorized)
+expert_tokens = x[expert_token_indices]
+
+# Process all tokens through this expert in one batch
+expert_output = self.experts[expert_idx](expert_tokens)
+
+# Weight the output
+weighted_output = expert_weights_for_tokens * expert_output
+
+# Scatter-add back to output (vectorized)
+output.index_add_(0, expert_token_indices, weighted_output)
 ```
 
-### 2. MoE Forward Pass Has O(n) Python Loops Per Expert (Critical for MoE users)
+Both the forward pass and `_compute_load_balance_loss()` now use tensor operations without Python loops over tokens.
 
-In `feedforward.py:272-290`, the MoE forward iterates over every expert with Python loops, and inside each expert's processing, iterates over individual tokens:
+### 3. Optimizer ~~Does Not Use~~ ✅ NOW USES Separate Weight Decay Groups
 
-```python
-for token_idx, global_idx in enumerate(token_indices):
-    expert_pos = (expert_indices_flat[global_idx] == expert_idx).nonzero(...)
-    ...
-    output[global_idx] += weight * expert_output[token_idx]
-```
+~~In `optimizers.py:31-41`, all parameters are passed to AdamW with the same weight decay...~~
 
-This is a token-level Python loop nested inside an expert-level loop. For a batch of 16 sequences x 256 tokens x 8 experts, that's potentially hundreds of thousands of Python iterations per forward pass. The load balancing loss computation (`_compute_load_balance_loss`) has the same issue.
-
-**Suggestion**: Replace with scatter/gather operations. The standard pattern is:
-1. Flatten tokens, compute routing.
-2. Use `torch.scatter` / `torch.gather` to dispatch tokens to experts as batches.
-3. Use `torch.scatter_add` to reassemble weighted outputs.
-
-This keeps everything in tensor ops with no Python loops over tokens. No GPU change needed.
-
-### 3. Optimizer Does Not Use Separate Weight Decay Groups
-
-In `optimizers.py:31-41`, all parameters are passed to AdamW with the same weight decay:
+**Status**: Fixed. Now separates parameters into decay and no-decay groups:
 
 ```python
-params = model.parameters()
-return optim.AdamW(params, lr=lr, weight_decay=weight_decay, ...)
-```
-
-Weight decay should **not** be applied to biases, LayerNorm/RMSNorm parameters, or embedding parameters. Applying weight decay to these hurts training quality. This is a well-documented best practice (GPT-2, GPT-3, LLaMA all separate decay/no-decay groups).
-
-**Suggestion**: Split parameters into decay and no-decay groups:
-
-```python
-decay = set()
-no_decay = set()
+decay_params = []
+no_decay_params = []
 for name, param in model.named_parameters():
-    if 'bias' in name or 'norm' in name or 'embedding' in name:
-        no_decay.add(name)
+    if any(key in name.lower() for key in ['bias', 'norm', 'embed', 'pos', 'rope']):
+        no_decay_params.append(param)
     else:
-        decay.add(name)
+        decay_params.append(param)
+
+param_groups = [
+    {'params': decay_params, 'weight_decay': weight_decay},
+    {'params': no_decay_params, 'weight_decay': 0.0}
+]
 ```
 
-No GPU cost difference.
+Weight decay is no longer applied to biases, LayerNorm/RMSNorm parameters, or embedding parameters, following GPT-2/3 and LLaMA best practices.
 
-### 4. Scheduler Steps Per Epoch Instead of Per Optimizer Step
+### 4. Scheduler Steps Per Epoch ~~Instead of~~ ✅ NOW Per Optimizer Step
 
-In `trainer.py:361-362`, the scheduler steps once per epoch:
+~~In `trainer.py:361-362`, the scheduler steps once per epoch...~~
+
+**Status**: Fixed. Scheduler now steps after each optimizer step (inside `train_step()`):
 
 ```python
+# After optimizer step (inside gradient accumulation block)
 if scheduler is not None:
     scheduler.step()
 ```
 
-But `CosineAnnealingWithWarmup` is configured with `total_steps` (optimizer steps), and its `get_lr()` uses `self.last_epoch` as a step counter. Calling it once per epoch means the warmup phase and cosine decay operate on epoch scale rather than step scale. For a 10-epoch run with 1000 steps per epoch, the scheduler sees 10 steps total instead of 10,000.
+This ensures warmup and cosine decay operate on the correct step scale rather than epoch scale.
 
-**Suggestion**: Move `scheduler.step()` inside the training loop, after each optimizer step (i.e., after each `gradient_accumulation_steps` batch), not after each epoch.
+### 5. ~~No~~ ✅ NOW HAS Validation Loop
 
-### 5. No Validation Loop
+~~The trainer has no validation loss computation...~~
 
-The trainer has no validation loss computation. There is a `best_loss` tracker, but it tracks **training loss**, not validation loss. This means:
-- You cannot detect overfitting during training.
-- The "best model" checkpoint is saved based on training loss, which always decreases and doesn't reflect generalization.
+**Status**: Fixed. Trainer now accepts `val_data` parameter and computes validation metrics:
 
-**Suggestion**: Accept a `val_data` parameter, compute validation loss at the end of each epoch (or every N steps), and use that for `best_loss`. The evaluation script (`comprehensive_evaluation.py`) exists but is separate from the training loop -- integrating periodic validation would catch overfitting early.
+```python
+trainer = Trainer(
+    model=model,
+    train_data=train_data,
+    val_data=val_data,  # NEW: optional validation data
+    optimizer=optimizer,
+    ...
+)
+```
+
+- Validation runs at the end of each epoch
+- Validation metrics are logged and stored in history
+- Best model is saved based on **validation loss** (when val_data is provided)
+- Falls back to training loss for best model if no validation data
+
+This enables early detection of overfitting and saves the model that generalizes best.
 
 ### 6. DataLoader Uses `num_workers=0`
 
@@ -198,11 +224,11 @@ loss = F.cross_entropy(logits_flat, targets_flat, ignore_index=PAD_TOKEN_ID)
 | Model architecture options | Strong |
 | Core attention/FFN correctness | Correct |
 | Training loop fundamentals | Solid (loss, grad clip, AMP) |
-| Flash attention implementation | Needs replacement |
-| MoE efficiency | Needs vectorization |
-| Optimizer parameter groups | Missing weight decay separation |
-| Scheduler integration | Bug: steps per epoch not per step |
-| Validation during training | Missing |
+| Flash attention implementation | ✅ Fixed: Uses native SDPA |
+| MoE efficiency | ✅ Fixed: Vectorized |
+| Optimizer parameter groups | ✅ Fixed: Separate decay groups |
+| Scheduler integration | ✅ Fixed: Steps per optimizer step |
+| Validation during training | ✅ Fixed: Integrated validation loop |
 | Generation efficiency | KV cache not used correctly |
 | Tokenization | CharTokenizer works; BPE impractical |
 | Positional encoding defaults | Redundant (learned + RoPE together) |
@@ -212,11 +238,15 @@ loss = F.cross_entropy(logits_flat, targets_flat, ignore_index=PAD_TOKEN_ID)
 
 ## Recommended Priority (no GPU cost changes)
 
-1. **Fix scheduler stepping** -- bug that affects training quality directly.
-2. **Add weight decay groups** -- affects training quality, trivial fix.
-3. **Fix KV cache in generation** -- makes inference much faster.
-4. **Replace flash attention with `F.scaled_dot_product_attention`** -- free real speedup.
-5. **Add validation loop** -- essential for knowing if training is working.
-6. **Fix positional encoding defaults** -- remove redundant learned + RoPE.
-7. **Increase `num_workers`** -- free throughput improvement.
-8. **Vectorize MoE** -- only matters if MoE is used.
+### ✅ Completed
+1. ~~**Fix scheduler stepping**~~ -- Fixed: Now steps per optimizer step
+2. ~~**Add weight decay groups**~~ -- Fixed: Separate decay/no-decay groups
+3. ~~**Replace flash attention**~~ -- Fixed: Uses `F.scaled_dot_product_attention`
+4. ~~**Add validation loop**~~ -- Fixed: Integrated validation with best model tracking
+5. ~~**Vectorize MoE**~~ -- Fixed: Uses tensor operations instead of Python loops
+
+### Remaining
+6. **Fix KV cache in generation** -- makes inference much faster (O(n²) → O(n)).
+7. **Fix positional encoding defaults** -- remove redundant learned + RoPE.
+8. **Increase `num_workers`** -- free throughput improvement.
+9. **BPE Tokenizer optimization** -- use Hugging Face tokenizers for production.

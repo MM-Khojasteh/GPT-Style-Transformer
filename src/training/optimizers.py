@@ -14,47 +14,70 @@ def get_optimizer(
     eps: float = 1e-8,
     **kwargs
 ) -> torch.optim.Optimizer:
-    """Get optimizer for model.
-    
+    """Get optimizer for model with proper weight decay grouping.
+
+    Separates parameters into decay and no-decay groups. Weight decay is NOT
+    applied to biases, LayerNorm/RMSNorm parameters, or embeddings, following
+    best practices from GPT-2/3 and LLaMA.
+
     Args:
         model: Model to optimize
         optimizer_type: Type of optimizer ('adamw', 'adam', 'sgd')
         lr: Learning rate
-        weight_decay: Weight decay
+        weight_decay: Weight decay (only applied to certain parameters)
         betas: Beta parameters for Adam/AdamW
         eps: Epsilon for numerical stability
         **kwargs: Additional optimizer-specific arguments
-        
+
     Returns:
         Optimizer instance
     """
-    params = model.parameters()
-    
+    # Separate parameters into decay and no-decay groups
+    decay_params = []
+    no_decay_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+
+        # Don't apply weight decay to:
+        # - Biases (any parameter with 'bias' in name)
+        # - LayerNorm/RMSNorm parameters (any parameter with 'norm' in name)
+        # - Embedding parameters (any parameter with 'embedding' or 'embed' in name)
+        # - Positional encoding parameters
+        if any(key in name.lower() for key in ['bias', 'norm', 'embed', 'pos', 'rope']):
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    # Create parameter groups
+    param_groups = [
+        {'params': decay_params, 'weight_decay': weight_decay},
+        {'params': no_decay_params, 'weight_decay': 0.0}
+    ]
+
     if optimizer_type.lower() == 'adamw':
         return optim.AdamW(
-            params,
+            param_groups,
             lr=lr,
             betas=betas,
             eps=eps,
-            weight_decay=weight_decay,
             **kwargs
         )
     elif optimizer_type.lower() == 'adam':
         return optim.Adam(
-            params,
+            param_groups,
             lr=lr,
             betas=betas,
             eps=eps,
-            weight_decay=weight_decay,
             **kwargs
         )
     elif optimizer_type.lower() == 'sgd':
         momentum = kwargs.get('momentum', 0.9)
         return optim.SGD(
-            params,
+            param_groups,
             lr=lr,
             momentum=momentum,
-            weight_decay=weight_decay,
             **kwargs
         )
     else:

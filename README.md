@@ -22,6 +22,9 @@ A comprehensive, production-ready implementation of GPT-style transformer archit
 ### Training Infrastructure
 - Mixed precision training (FP16/BF16)
 - Gradient accumulation and clipping
+- **Validation during training** with automatic best model selection based on validation loss
+- **Proper weight decay grouping** (no decay on biases, norms, embeddings per GPT/LLaMA best practices)
+- **Correct LR scheduler stepping** per optimizer step (not per epoch)
 - Distributed training support (DDP)
 - Gradient checkpointing for memory efficiency
 - Comprehensive checkpointing system
@@ -35,7 +38,8 @@ A comprehensive, production-ready implementation of GPT-style transformer archit
 - Model checkpoint management
 
 ### Optimizations
-- Flash Attention implementation
+- **Flash Attention** via PyTorch native `scaled_dot_product_attention` (automatic kernel selection)
+- **Vectorized MoE** for efficient mixture-of-experts training
 - Gradient checkpointing
 - Model quantization support
 - TorchScript compilation support
@@ -162,7 +166,8 @@ python examples/train_model.py \
 **Training Output:**
 - Model checkpoints are saved to `./checkpoints/`
 - TensorBoard logs are saved to `./runs/` (view with `tensorboard --logdir runs`)
-- The best model is saved as `checkpoints/best_model.pt`
+- The best model is saved as `checkpoints/best_model.pt` (selected by **validation loss** when validation data is provided, training loss otherwise)
+- Validation metrics are displayed and logged at the end of each epoch (when using `--val-split`)
 
 ### Step 3: Evaluate Model Performance
 

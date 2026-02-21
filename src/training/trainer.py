@@ -58,11 +58,13 @@ class GPTDataset(Dataset):
 
 class Trainer:
     """Trainer for GPT model.
-    
+
     Args:
         model: GPT model to train
         train_data: Training data (list of token sequences or long sequence)
         optimizer: Optimizer
+        val_data: Optional validation data for computing validation loss
+        val_interval: Validate every N steps (default: every epoch)
         device: Device to train on ('cuda' or 'cpu')
         seq_len: Sequence length for training
         batch_size: Batch size
@@ -84,6 +86,8 @@ class Trainer:
         model: nn.Module,
         train_data: Union[List[List[int]], List[int]],
         optimizer: torch.optim.Optimizer,
+        val_data: Optional[Union[List[List[int]], List[int]]] = None,
+        val_interval: Optional[int] = None,
         device: str = 'cuda',
         seq_len: int = 512,
         batch_size: int = 16,
@@ -104,6 +108,8 @@ class Trainer:
     ):
         self.model = model
         self.optimizer = optimizer
+        self.val_data = val_data
+        self.val_interval = val_interval
         
         # Get device and check GPU availability
         self.device = get_device(device)
@@ -169,6 +175,18 @@ class Trainer:
             num_workers=0,  # Set to >0 if you have multiple workers
             pin_memory=True if device == 'cuda' else False
         )
+
+        # Create validation dataloader if validation data is provided
+        self.val_dataloader = None
+        if val_data is not None:
+            val_dataset = GPTDataset(val_data, seq_len)
+            self.val_dataloader = DataLoader(
+                val_dataset,
+                batch_size=batch_size,
+                shuffle=False,  # No need to shuffle validation data
+                num_workers=0,
+                pin_memory=True if device == 'cuda' else False
+            )
         
         # Setup logging
         self.logger = setup_logging(
@@ -181,7 +199,9 @@ class Trainer:
         self.global_step = 0
         self.epoch = 0
         self.best_loss = float('inf')
-        
+        self.best_val_loss = float('inf')
+        self.val_metrics_history = []
+
         # Create checkpoint directory
         os.makedirs(checkpoint_dir, exist_ok=True)
         
@@ -221,17 +241,18 @@ class Trainer:
             return loss, logits
         return loss
     
-    def train_step(self, batch: torch.Tensor) -> Dict[str, float]:
+    def train_step(self, batch: torch.Tensor, scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None) -> Dict[str, float]:
         """Perform a single training step.
-        
+
         Args:
             batch: Batch of token sequences
-            
+            scheduler: Optional learning rate scheduler (steps after optimizer step)
+
         Returns:
             Dictionary of metrics
         """
         batch = batch.to(self.device)
-        
+
         # Forward pass with mixed precision
         if self.use_amp:
             # Use new PyTorch 2.5+ API for autocast
@@ -239,17 +260,18 @@ class Trainer:
                 loss = self.compute_loss(batch)
         else:
             loss = self.compute_loss(batch)
-        
+
         # Scale loss for gradient accumulation
         loss = loss / self.gradient_accumulation_steps
-        
+
         # Backward pass
         if self.use_amp:
             self.scaler.scale(loss).backward()
         else:
             loss.backward()
-        
+
         # Update weights (only after accumulating gradients)
+        optimizer_step_taken = False
         if (self.global_step + 1) % self.gradient_accumulation_steps == 0:
             # Gradient clipping
             if self.max_grad_norm > 0:
@@ -264,28 +286,37 @@ class Trainer:
                         self.model.parameters(),
                         self.max_grad_norm
                     )
-            
+
             # Optimizer step
             if self.use_amp:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 self.optimizer.step()
-            
+
             self.optimizer.zero_grad()
-        
+            optimizer_step_taken = True
+
+            # Step scheduler after optimizer step (not after epoch)
+            # This ensures proper warmup and cosine decay timing
+            if scheduler is not None:
+                scheduler.step()
+
         # Compute perplexity
         perplexity = torch.exp(loss * self.gradient_accumulation_steps).item()
-        
+
         return {
             'loss': loss.item() * self.gradient_accumulation_steps,
             'perplexity': perplexity,
             'learning_rate': self.optimizer.param_groups[0]['lr']
         }
     
-    def train_epoch(self) -> Dict[str, float]:
+    def train_epoch(self, scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None) -> Dict[str, float]:
         """Train for one epoch.
-        
+
+        Args:
+            scheduler: Optional learning rate scheduler
+
         Returns:
             Dictionary of average metrics
         """
@@ -293,11 +324,11 @@ class Trainer:
         total_loss = 0.0
         total_perplexity = 0.0
         num_batches = 0
-        
+
         progress_bar = tqdm(self.dataloader, desc=f"Epoch {self.epoch}")
-        
+
         for batch in progress_bar:
-            metrics = self.train_step(batch)
+            metrics = self.train_step(batch, scheduler=scheduler)
             
             total_loss += metrics['loss']
             total_perplexity += metrics['perplexity']
@@ -337,7 +368,56 @@ class Trainer:
             'loss': avg_loss,
             'perplexity': avg_perplexity
         }
-    
+
+    def validate(self) -> Dict[str, float]:
+        """Validate the model on validation data.
+
+        Returns:
+            Dictionary of validation metrics
+        """
+        if self.val_dataloader is None:
+            return {}
+
+        self.model.eval()
+        total_loss = 0.0
+        total_perplexity = 0.0
+        num_batches = 0
+
+        with torch.no_grad():
+            progress_bar = tqdm(self.val_dataloader, desc="Validation")
+            for batch in progress_bar:
+                batch = batch.to(self.device)
+
+                # Forward pass
+                if self.use_amp:
+                    with torch.amp.autocast('cuda', dtype=self.amp_dtype):
+                        loss = self.compute_loss(batch)
+                else:
+                    loss = self.compute_loss(batch)
+
+                perplexity = torch.exp(loss).item()
+
+                total_loss += loss.item()
+                total_perplexity += perplexity
+                num_batches += 1
+
+                # Update progress bar
+                progress_bar.set_postfix({
+                    'loss': f"{loss.item():.4f}",
+                    'ppl': f"{perplexity:.2f}"
+                })
+
+        avg_loss = total_loss / num_batches
+        avg_perplexity = total_perplexity / num_batches
+
+        # Switch back to training mode
+        self.model.train()
+
+        return {
+            'val_loss': avg_loss,
+            'val_perplexity': avg_perplexity
+        }
+
     def train(self, epochs: int, scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None):
         """Train the model.
         
@@ -356,21 +436,46 @@ class Trainer:
         
         for epoch in range(self.epoch, epochs):
             self.epoch = epoch
-            metrics = self.train_epoch()
-            
-            # Update learning rate scheduler
-            if scheduler is not None:
-                scheduler.step()
-            
+            metrics = self.train_epoch(scheduler=scheduler)
+
             print(f"Epoch {epoch} completed:")
-            print(f"  Loss: {metrics['loss']:.4f}")
-            print(f"  Perplexity: {metrics['perplexity']:.2f}")
-            
-            # Save best model
-            if metrics['loss'] < self.best_loss:
-                self.best_loss = metrics['loss']
-                self.save_checkpoint("best_model.pt")
-            
+            print(f"  Train Loss: {metrics['loss']:.4f}")
+            print(f"  Train Perplexity: {metrics['perplexity']:.2f}")
+
+            # Validation (at end of epoch or if interval is set, check)
+            if self.val_dataloader is not None:
+                val_metrics = self.validate()
+                if val_metrics:
+                    print(f"  Val Loss: {val_metrics['val_loss']:.4f}")
+                    print(f"  Val Perplexity: {val_metrics['val_perplexity']:.2f}")
+
+                    # Log validation metrics
+                    log_metrics(
+                        self.logger,
+                        val_metrics,
+                        step=self.global_step,
+                        epoch=self.epoch
+                    )
+
+                    # Store validation metrics history
+                    self.val_metrics_history.append({
+                        'epoch': epoch,
+                        'step': self.global_step,
+                        **val_metrics
+                    })
+
+                    # Save best model based on validation loss (if available)
+                    # This prevents overfitting - we want the model that generalizes best
+                    if val_metrics['val_loss'] < self.best_val_loss:
+                        self.best_val_loss = val_metrics['val_loss']
+                        self.save_checkpoint("best_model.pt")
+                        print(f"  -> New best validation loss: {self.best_val_loss:.4f}")
+            else:
+                # If no validation data, fall back to training loss (original behavior)
+                if metrics['loss'] < self.best_loss:
+                    self.best_loss = metrics['loss']
+                    self.save_checkpoint("best_model.pt")
+
             # Save epoch checkpoint
             self.save_checkpoint(f"checkpoint_epoch_{epoch}.pt")
             
@@ -388,11 +493,13 @@ class Trainer:
     
     def save_checkpoint(self, filename: str):
         """Save training checkpoint.
-        
+
         Args:
             filename: Checkpoint filename
         """
         checkpoint_path = os.path.join(self.checkpoint_dir, filename)
+        # Save both training and validation best losses
+        best_loss_to_save = self.best_val_loss if self.val_dataloader else self.best_loss
         save_checkpoint(
             checkpoint_path,
             self.model,
@@ -400,7 +507,8 @@ class Trainer:
             self.scaler,
             self.global_step,
             self.epoch,
-            self.best_loss
+            best_loss_to_save,
+            best_val_loss=self.best_val_loss
         )
         print(f"Checkpoint saved: {checkpoint_path}")
     
@@ -419,6 +527,10 @@ class Trainer:
         self.global_step = state.get('global_step', 0)
         self.epoch = state.get('epoch', 0)
         self.best_loss = state.get('best_loss', float('inf'))
+        # Load best_val_loss if available, otherwise use best_loss
+        self.best_val_loss = state.get('best_val_loss', self.best_loss)
         print(f"Checkpoint loaded: {checkpoint_path}")
         print(f"Resuming from step {self.global_step}, epoch {self.epoch}")
+        if self.val_dataloader:
+            print(f"  Best validation loss: {self.best_val_loss:.4f}")
 
