@@ -106,7 +106,3 @@ logits = model(torch.randint(0, 65, (2, 128)))
 ```bash
 pytest tests/
 ```
-
-## License
-
-MIT
