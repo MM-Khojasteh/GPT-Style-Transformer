@@ -3,6 +3,8 @@
 from typing import Optional, Dict, Any
 import os
 
+from src.utils.env_config import env_str
+
 
 class Logger:
     """Unified logger interface for WandB and TensorBoard."""
@@ -11,7 +13,8 @@ class Logger:
         self,
         use_wandb: bool = False,
         use_tensorboard: bool = False,
-        project_name: str = 'gpt-transformer',
+        project_name: str = env_str('WANDB_PROJECT', 'WandB project name',
+                                    required=False, default='gpt-transformer'),
         run_name: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None
     ):

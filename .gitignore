@@ -1,150 +1,195 @@
-# Byte-compiled / optimized / DLL files
+# ============================================================================
+# GPT-Style-Transformer — strict .gitignore (least-privilege policy)
+#
+# Policy: ONLY source code, tests, notebooks, documentation, and explicitly
+# whitelisted project files may be tracked. Everything else — secrets, data,
+# model artifacts, caches, logs, IDE state — is denied by default.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 1. SECRETS & CREDENTIALS (highest priority — never commit these)
+# ----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.env
+.envrc
+.direnv/
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*.kube/config
+credentials*
+*credential*
+secrets.*
+*.secret
+.kaggle/
+kaggle.json
+.ngrok2/
+
+# ----------------------------------------------------------------------------
+# 2. PYTHON — bytecode, caches, test & packaging artifacts
+# ----------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
+/build/
+/dist/
 *.egg-info/
-.installed.cfg
+.eggs/
+pip-wheel-metadata/
+share/python-wheels/
+/wheels/
 *.egg
 MANIFEST
-
-# PyInstaller
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.coverage
+.coverage.*
+coverage.xml
 htmlcov/
 .tox/
 .nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
 .hypothesis/
-.pytest_cache/
-cover/
+.ipynb_checkpoints/
+/.cache/
 
-# Jupyter Notebook
-.ipynb_checkpoints
-*/.ipynb_checkpoints/*
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-.python-version
-
-# Environments
-.env
-.venv
-env/
-venv/
+# ----------------------------------------------------------------------------
+# 3. VIRTUAL ENVIRONMENTS & PACKAGE MANAGERS
+# ----------------------------------------------------------------------------
+.venv/
+/venv/
+/env/
 ENV/
-env.bak/
-venv.bak/
+.conda/
+.python-version
+pip-log.txt
+pip-delete-this-directory.txt
 
-# IDEs
-.vscode/
-.idea/
-.claude/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Model files
+# ----------------------------------------------------------------------------
+# 4. MODEL ARTIFACTS & TRAINING OUTPUT (large binaries / trained IP)
+# ----------------------------------------------------------------------------
+checkpoints/*
+!checkpoints/README.md
+checkpoints_finetuned/
+/models/
+/outputs/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.onnx
+*.pb
+*.tflite
 *.h5
 *.hdf5
 *.pkl
 *.pickle
-*.pth
-*.pt
-*.onnx
-*.pb
-*.tflite
+*.msgpack
+*.gguf
+*.npy
+*.npz
+*.sqlite
+*.sqlite3
+*.db
+# Evaluation report written by comprehensive_evaluation.py --output <file>
+/evaluation_results*.json
+# To publish curated results later, re-include explicitly, e.g.:
+# !docs/results/*.json
 
-# Data files (keep CSV files for this project)
-# *.csv
+# ----------------------------------------------------------------------------
+# 5. DATA (training corpora are private — never committed)
+# ----------------------------------------------------------------------------
+data/*
+!data/README.md
+*.csv
+*.tsv
+*.parquet
+*.jsonl
+/datasets/
 
-# Large data files
+# ----------------------------------------------------------------------------
+# PRIVATE WORKING NOTES (internal reviews & summaries — never published)
+# ----------------------------------------------------------------------------
+/notes/
+
+# ----------------------------------------------------------------------------
+# 6. EXPERIMENT TRACKING & LOGS
+#   (*.tfevents.* also catches stray event files that embed hostnames)
+# ----------------------------------------------------------------------------
+/runs/
+*.tfevents.*
+/wandb/
+/lightning_logs/
+/mlruns/
+/logs/
+*.log
+*.out
+*.err
+
+# ----------------------------------------------------------------------------
+# 7. JUPYTER / IPYTHON local state
+# ----------------------------------------------------------------------------
+.ipython/
+.jupyter/
+
+# ----------------------------------------------------------------------------
+# 8. IDE & EDITOR STATE
+# ----------------------------------------------------------------------------
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+.claude/
+.cursor/
+.continue/
+.history/
+.aider*
+.windsurf/
+.codex/
+
+# ----------------------------------------------------------------------------
+# 9. OS-GENERATED FILES
+# ----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+ehthumbs.db
+*.lnk
+*.stackdump
+core
+core.*
+
+# ----------------------------------------------------------------------------
+# 10. ARCHIVES, MEDIA & TEMPORARY FILES
+# ----------------------------------------------------------------------------
 *.zip
 *.tar
 *.tar.gz
+*.tgz
 *.rar
-
-# Logs
-*.log
-logs/
-tensorboard_logs/
-
-# Output files
+*.7z
 *.png
 *.jpg
 *.jpeg
 *.gif
 *.svg
 *.pdf
-
-# Temporary files
 *.tmp
 *.temp
 *.bak
-*.backup
 *.old
-
-# Configuration files with credentials
-config.ini
-secrets.json
-credentials.json
-
-# Kaggle
-kaggle.json
-.kaggle/
-
-# System files
-Thumbs.db
-desktop.ini
-
-# Project specific
-model_performance_metrics.csv
-ensemble_config.json
-scalers.pkl
-best_*.h5
-checkpoint/
-saved_models/
-
-# Keep important files
-!KwhConsumptionBlower78_1.csv
-!KwhConsumptionBlower78_2.csv
-!KwhConsumptionBlower78_3.csv
-!requirements.txt
-!README.md
-
-runs/
-data/
+*.orig
+*.rej
+# To ship diagrams later, re-include them explicitly, e.g.:
+# !docs/**/*.png

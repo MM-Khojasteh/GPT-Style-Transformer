@@ -18,21 +18,26 @@ from src.utils.tokenizer import CharTokenizer
 from src.utils.checkpointing import load_checkpoint
 from src.utils.device import get_device, print_gpu_info
 from src.utils.config_presets import get_model_config, get_training_config
+from src.utils.env_config import env_str, env_int, env_float, env_bool
 from src.optimizations.gradient_checkpoint import apply_gradient_checkpointing
 
 
 def main():
     parser = argparse.ArgumentParser(description='Fine-tune GPT model')
-    parser.add_argument('--base-model', type=str, default='./checkpoints/best_model.pt',
+    parser.add_argument('--base-model', type=str,
+                        default=env_str('CHECKPOINT_PATH', 'Base model weights to fine-tune'),
                         help='Path to base model checkpoint')
-    parser.add_argument('--data', type=str, default='data/fine_tune_text.txt',
+    parser.add_argument('--data', type=str,
+                        default=env_str('FINETUNE_DATA_PATH', 'Path to the fine-tuning corpus'),
                         help='Path to fine-tuning data')
     parser.add_argument('--preset', type=str, default='medium',
                         choices=['tiny', 'small', 'medium', 'large', 'xl', 'xxl'],
                         help='Model preset (should match base model)')
-    parser.add_argument('--epochs', type=int, default=3,
+    parser.add_argument('--epochs', type=int,
+                        default=env_int('FINETUNE_EPOCHS', 'Number of fine-tuning epochs'),
                         help='Number of fine-tuning epochs')
-    parser.add_argument('--lr', type=float, default=1e-5,
+    parser.add_argument('--lr', type=float,
+                        default=env_float('FINETUNE_LEARNING_RATE', 'Peak learning rate for fine-tuning'),
                         help='Learning rate for fine-tuning (typically lower than pretraining)')
     args = parser.parse_args()
     
@@ -97,7 +102,7 @@ def main():
         model,
         optimizer_type='adamw',
         lr=args.lr,
-        weight_decay=0.1
+        weight_decay=env_float('TRAIN_WEIGHT_DECAY', 'Decoupled weight decay for AdamW')
     )
     
     # Create scheduler
@@ -106,7 +111,8 @@ def main():
         optimizer,
         scheduler_type='cosine',
         max_lr=args.lr,
-        warmup_steps=total_steps // 10,
+        warmup_steps=int(total_steps * env_float(
+            'TRAIN_WARMUP_FRACTION', 'Fraction of total steps used for LR warmup')),
         total_steps=total_steps
     )
     
@@ -123,13 +129,13 @@ def main():
         seq_len=train_config['seq_len'],
         batch_size=train_config['batch_size'],
         gradient_accumulation_steps=train_config['gradient_accumulation_steps'],
-        max_grad_norm=1.0,
-        use_amp=True,
-        checkpoint_dir='./checkpoints_finetuned',
-        checkpoint_interval=500,
-        log_interval=10,
-        use_wandb=False,
-        use_tensorboard=True,
+        max_grad_norm=env_float('TRAIN_MAX_GRAD_NORM', 'Gradient clipping threshold'),
+        use_amp=env_bool('TRAIN_USE_AMP', 'Mixed-precision (AMP) training'),
+        checkpoint_dir=env_str('FINETUNE_CHECKPOINT_DIR', 'Directory for fine-tuned checkpoints'),
+        checkpoint_interval=env_int('FINETUNE_CHECKPOINT_INTERVAL', 'Steps between checkpoints'),
+        log_interval=env_int('LOG_INTERVAL', 'Steps between console log lines'),
+        use_wandb=env_bool('USE_WANDB', 'Weights & Biases logging'),
+        use_tensorboard=env_bool('USE_TENSORBOARD', 'TensorBoard logging'),
         project_name='gpt-finetune',
         enable_memory_profiling=True
     )

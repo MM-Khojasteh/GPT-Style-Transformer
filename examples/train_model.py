@@ -17,6 +17,7 @@ from src.training.schedulers import get_scheduler
 from src.utils.tokenizer import CharTokenizer
 from src.utils.device import get_device, print_gpu_info
 from src.utils.config_presets import get_model_config, get_training_config, estimate_model_size
+from src.utils.env_config import env_str, env_int, env_float, env_bool
 from src.optimizations.gradient_checkpoint import apply_gradient_checkpointing
 import random
 
@@ -26,17 +27,23 @@ def main():
     parser.add_argument('--preset', type=str, default='medium',
                         choices=['tiny', 'small', 'medium', 'large', 'xl', 'xxl'],
                         help='Model size preset')
-    parser.add_argument('--data', type=str, default='data/sample_text.txt',
+    parser.add_argument('--data', type=str,
+                        default=env_str('TRAIN_DATA_PATH', 'Path to the training corpus'),
                         help='Path to training data file')
-    parser.add_argument('--epochs', type=int, default=10,
+    parser.add_argument('--epochs', type=int,
+                        default=env_int('TRAIN_EPOCHS', 'Number of training epochs'),
                         help='Number of training epochs')
-    parser.add_argument('--lr', type=float, default=3e-4,
+    parser.add_argument('--lr', type=float,
+                        default=env_float('TRAIN_LEARNING_RATE', 'Peak learning rate for AdamW'),
                         help='Learning rate')
-    parser.add_argument('--val-split', type=float, default=0.1,
+    parser.add_argument('--val-split', type=float,
+                        default=env_float('TRAIN_VAL_SPLIT', 'Validation split ratio'),
                         help='Validation split ratio (0.0 to disable)')
-    parser.add_argument('--test-split', type=float, default=0.1,
+    parser.add_argument('--test-split', type=float,
+                        default=env_float('TRAIN_TEST_SPLIT', 'Test split ratio'),
                         help='Test split ratio (0.0 to disable)')
-    parser.add_argument('--seed', type=int, default=42,
+    parser.add_argument('--seed', type=int,
+                        default=env_int('TRAIN_RANDOM_SEED', 'Reproducibility seed'),
                         help='Random seed for reproducibility')
     parser.add_argument('--save-splits', action='store_true',
                         help='Save train/validation/test splits to separate files')
@@ -182,7 +189,7 @@ def main():
         model,
         optimizer_type='adamw',
         lr=args.lr,
-        weight_decay=0.1
+        weight_decay=env_float('TRAIN_WEIGHT_DECAY', 'Decoupled weight decay for AdamW')
     )
     
     # Create scheduler
@@ -191,7 +198,8 @@ def main():
         optimizer,
         scheduler_type='cosine',
         max_lr=args.lr,
-        warmup_steps=total_steps // 10,
+        warmup_steps=int(total_steps * env_float(
+            'TRAIN_WARMUP_FRACTION', 'Fraction of total steps used for LR warmup')),
         total_steps=total_steps
     )
     
@@ -208,13 +216,13 @@ def main():
         seq_len=train_config['seq_len'],
         batch_size=train_config['batch_size'],
         gradient_accumulation_steps=train_config['gradient_accumulation_steps'],
-        max_grad_norm=1.0,
-        use_amp=True,
-        checkpoint_dir='./checkpoints',
-        checkpoint_interval=1000,
-        log_interval=10,
-        use_wandb=False,
-        use_tensorboard=True,
+        max_grad_norm=env_float('TRAIN_MAX_GRAD_NORM', 'Gradient clipping threshold'),
+        use_amp=env_bool('TRAIN_USE_AMP', 'Mixed-precision (AMP) training'),
+        checkpoint_dir=env_str('CHECKPOINT_DIR', 'Directory for training checkpoints'),
+        checkpoint_interval=env_int('TRAIN_CHECKPOINT_INTERVAL', 'Steps between checkpoints'),
+        log_interval=env_int('LOG_INTERVAL', 'Steps between console log lines'),
+        use_wandb=env_bool('USE_WANDB', 'Weights & Biases logging'),
+        use_tensorboard=env_bool('USE_TENSORBOARD', 'TensorBoard logging'),
         project_name=f'gpt-transformer-{args.preset}'
     )
     

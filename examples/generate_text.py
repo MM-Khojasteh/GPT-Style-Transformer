@@ -16,29 +16,37 @@ from src.utils.generation import generate_text
 from src.utils.checkpointing import load_checkpoint
 from src.utils.device import get_device, print_gpu_info
 from src.utils.config_presets import get_model_config
+from src.utils.env_config import env_str, env_int, env_float
 
 
 def main():
     parser = argparse.ArgumentParser(description='Generate text with GPT model')
-    parser.add_argument('--checkpoint', type=str, default='./checkpoints/best_model.pt',
+    parser.add_argument('--checkpoint', type=str,
+                        default=env_str('CHECKPOINT_PATH', 'Trained model weights to load'),
                         help='Path to model checkpoint')
     parser.add_argument('--preset', type=str, default='medium',
                         choices=['tiny', 'small', 'medium', 'large', 'xl', 'xxl'],
                         help='Model preset (should match training preset)')
     parser.add_argument('--prompt', type=str, default='The future of',
                         help='Text prompt for generation')
-    parser.add_argument('--max-tokens', type=int, default=100,
+    parser.add_argument('--max-tokens', type=int,
+                        default=env_int('GEN_MAX_NEW_TOKENS', 'Maximum tokens to generate'),
                         help='Maximum number of tokens to generate')
-    parser.add_argument('--temperature', type=float, default=0.7,
+    parser.add_argument('--temperature', type=float,
+                        default=env_float('GEN_TEMPERATURE', 'Sampling temperature (0 = greedy)'),
                         help='Sampling temperature')
-    parser.add_argument('--top-k', type=int, default=50,
+    parser.add_argument('--top-k', type=int,
+                        default=env_int('GEN_TOP_K', 'Top-k sampling (0 disables)'),
                         help='Top-k sampling')
-    parser.add_argument('--top-p', type=float, default=0.9,
+    parser.add_argument('--top-p', type=float,
+                        default=env_float('GEN_TOP_P', 'Nucleus sampling (1.0 disables)'),
                         help='Top-p (nucleus) sampling')
     args = parser.parse_args()
     
     # Load tokenizer
-    with open('data/sample_text.txt', 'r', encoding='utf-8') as f:
+    with open(env_str('TOKENIZER_CORPUS_PATH',
+                      'Corpus used to rebuild the character vocabulary'),
+              'r', encoding='utf-8') as f:
         text = f.read()
     
     tokenizer = CharTokenizer(text)
